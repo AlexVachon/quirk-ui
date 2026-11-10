@@ -1,0 +1,8 @@
+name          = "ui"
+version       = "1.0.0"
+license       = "MIT"
+description   = "Widgets for window: labels, buttons, checkboxes, text inputs, sliders, lists; rows, columns, focus, themes."
+repository    = "github.com/AlexVachon/quirk-ui"
+quirk-version = ">=7.21.0"
+
+[deps]
