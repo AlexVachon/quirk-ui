@@ -18,7 +18,12 @@ Widgets:
   `ui.Slider(min=0, max=100, value=50, on_change=fn(v) => ...)`
   `ui.ProgressBar(value=0, max=100, show_text=false)`
   `ui.ListView(items, on_select=fn(i, item) => ...)`
+  `ui.TreeView([ui.TreeNode("src", [ui.TreeNode("main.qk")])], on_select=fn(node) => ...)`
+  `ui.Table(["Name", "Size"], rows, on_select=fn(i, row) => ...)`
   `ui.Dropdown(options, selected=0, on_change=fn(i, item) => ...)`
+Menus:
+  `ui.MenuBar(["File"], [ui.Menu([ui.MenuItem("Open", on_click=fn() => ...)])])`
+  `widget.context_menu = ui.Menu([...])` — opened by a right-click
 Layout:
   `ui.Column(children, padding=, spacing=)` — stacked top to bottom
   `ui.Row(children, padding=, spacing=)`    — side by side
@@ -161,6 +166,7 @@ frame; `min_w` / `min_h` are the size the widget asks for.
   `enabled`  — false: drawn dimmed, ignores input
   `hovered`, `focused`, `pressed` — set by the App
   `tooltip`  — text shown when the mouse rests on it ("" = none)
+  `context_menu` — a `ui.Menu` opened by a right-click on it (or null)
 To make your own widget, subclass it and override `measure`, `draw` and
 `handle` (and `children` for containers).
 ---
@@ -180,6 +186,7 @@ struct Widget {
     pressed: Bool
     tooltip: String
     takes_clicks: Bool
+    context_menu: Menu
 
     define __init(self) -> void {
         self.x = 0
@@ -197,6 +204,7 @@ struct Widget {
         self.pressed = false
         self.tooltip = ""
         self.takes_clicks = false
+        self.context_menu = null
     }
 
     --- Work out `min_w` / `min_h` (containers measure their children first). ---
@@ -242,7 +250,16 @@ struct Widget {
         return false
     }
 
+    // Keys for an open popup that takes them itself (Menu); true if used.
+    define popup_key(self, e: window.Event) -> Bool {
+        return false
+    }
+
     define close_popup(self) -> void {
+    }
+
+    // Open this popup at (px, py) (Menu).
+    define open_at(self, px: Int, py: Int) -> void {
     }
 }
 
@@ -1652,6 +1669,551 @@ struct ListView : Widget {
     }
 }
 
+// ===== TreeView =====
+
+---
+One node of a `ui.TreeView`: `text`, `children` (TreeNodes), whether it's
+`expanded`, and `data` — anything you want to keep with it.
+`add(child)` adds a child and returns it.
+---
+struct TreeNode {
+    text: String
+    children: List
+    expanded: Bool
+    data: Any
+    parent: TreeNode
+
+    define __init(self, text: String, children: List = [], expanded: Bool = false, data: Any = null) -> void {
+        self.text = text
+        self.children = []
+        self.expanded = expanded
+        self.data = data
+        self.parent = null
+        for c in children {
+            n: TreeNode = c
+            self.add(n)
+        }
+    }
+
+    --- Add `child` under this node; returns it. ---
+    define add(self, child: TreeNode) -> TreeNode {
+        child.parent = self
+        self.children.append(child)
+        return child
+    }
+
+    --- How deep it is (0 for a root). ---
+    define depth(self) -> Int {
+        d := 0
+        p := self.parent
+        while p != null {
+            d = d + 1
+            p = p.parent
+        }
+        return d
+    }
+}
+
+---
+A tree of `ui.TreeNode`s, nested nodes indented. Click the arrow (or
+double-click the row) to expand / collapse; click a row to select it.
+Keys: Up / Down move, Right expands (or goes to the first child), Left
+collapses (or goes to the parent), Enter toggles. `on_select(node)` runs
+when the selection changes; `selected` is the node (or null).
+---
+struct TreeView : Widget {
+    roots: List
+    selected: TreeNode
+    on_select: Callable
+    rows: Int
+    _top: Int
+    _ind: Int
+
+    define __init(self, roots: List, on_select: Callable = null, rows: Int = 8, expand: Bool = false) -> void {
+        super().__init()
+        self.roots = roots
+        self.selected = null
+        self.on_select = on_select
+        self.rows = rows
+        self.expand = expand
+        self._top = 0
+        self._ind = 16
+        self.focusable = true
+    }
+
+    define _row_h(self) -> Int {
+        return 24
+    }
+
+    define _shown(self) -> Int {
+        return _max(1, (self.height - 4) / self._row_h())
+    }
+
+    define _flatten(self, nodes: List, out: List) -> void {
+        for c in nodes {
+            n: TreeNode = c
+            out.append(n)
+            if n.expanded { self._flatten(n.children, out) }
+        }
+    }
+
+    --- The nodes on screen in order (expanded parents' children included). ---
+    define visible_nodes(self) -> List {
+        out := []
+        self._flatten(self.roots, out)
+        return out
+    }
+
+    define _index_of(self, vis: List, n: TreeNode) -> Int {
+        i := 0
+        while i < vis.length() {
+            v: TreeNode = vis[i]
+            if v == n { return i }
+            i = i + 1
+        }
+        return -1
+    }
+
+    --- Select `node` (null: none); runs `on_select` if it changed. ---
+    define select(self, node: TreeNode) -> void {
+        if node == self.selected { return }
+        self.selected = node
+        if node != null {
+            vis := self.visible_nodes()
+            i := self._index_of(vis, node)
+            if i >= 0 {
+                if i < self._top { self._top = i }
+                if i >= self._top + self._shown() { self._top = i - self._shown() + 1 }
+            }
+        }
+        if self.on_select != null { self.on_select(node) }
+    }
+
+    --- Expand or collapse `node`. ---
+    define toggle(self, node: TreeNode) -> void {
+        if node.children.length() == 0 { return }
+        node.expanded = not node.expanded
+        // A selected node hidden by the collapse: select the collapsed one.
+        if not node.expanded and self.selected != null {
+            p := self.selected.parent
+            while p != null {
+                if p == node {
+                    self.select(node)
+                    return
+                }
+                p = p.parent
+            }
+        }
+    }
+
+    define measure(self, t: Theme) -> void {
+        widest := 10
+        for c in self.visible_nodes() {
+            n: TreeNode = c
+            widest = _max(widest, n.depth() * self._ind + 16 + window.text_width(n.text, t.scale))
+        }
+        self.min_w = _min(widest, 60 * t.char_w()) + 16
+        self.min_h = self.rows * self._row_h() + 4
+    }
+
+    define handle(self, e: window.Event) -> Bool {
+        if not self.enabled { return false }
+        vis := self.visible_nodes()
+        if e.kind == "mouse_down" and e.button == 1 {
+            row := (e.y - self.y - 2) / self._row_h()
+            i := self._top + row
+            if row >= 0 and i < vis.length() {
+                n: TreeNode = vis[i]
+                arrow_x := self.x + 6 + n.depth() * self._ind
+                if e.clicks >= 2 or (e.x >= arrow_x - 2 and e.x < arrow_x + 14) {
+                    self.toggle(n)
+                }
+                self.select(n)
+            }
+            return true
+        }
+        if e.kind == "mouse_up" { return true }
+        if e.kind == "wheel" {
+            most := _max(0, vis.length() - self._shown())
+            self._top = _clamp(self._top - e.dy, 0, most)
+            return true
+        }
+        if e.kind != "key_down" or vis.length() == 0 { return false }
+        k := e.key
+        cur := self._index_of(vis, self.selected)
+        if k == "down" {
+            self.select(vis[_min(vis.length() - 1, cur + 1)])
+        } elif k == "up" {
+            self.select(vis[_max(0, cur - 1)])
+        } elif k == "home" {
+            self.select(vis[0])
+        } elif k == "end" {
+            self.select(vis[vis.length() - 1])
+        } elif self.selected == null {
+            return false
+        } elif k == "right" {
+            n := self.selected
+            if n.children.length() > 0 and not n.expanded {
+                n.expanded = true
+            } elif n.children.length() > 0 {
+                self.select(n.children[0])
+            }
+        } elif k == "left" {
+            n := self.selected
+            if n.expanded {
+                n.expanded = false
+            } elif n.parent != null {
+                self.select(n.parent)
+            }
+        } elif k == "return" or k == "keypad_enter" or k == "space" {
+            self.toggle(self.selected)
+        } else {
+            return false
+        }
+        return true
+    }
+
+    define draw(self, win: window.Window, t: Theme) -> void {
+        win.rect(self.x, self.y, self.width, self.height, t.input)
+        border := t.border
+        if self.focused { border = t.accent }
+        win.rect(self.x, self.y, self.width, self.height, border, fill=false)
+        vis := self.visible_nodes()
+        rh := self._row_h()
+        shown := self._shown()
+        most := _max(0, vis.length() - shown)
+        if self._top > most { self._top = most }
+        _clip_push(win, self.x + 1, self.y + 1, self.width - 2, self.height - 2)
+        i := self._top
+        while i < vis.length() and i < self._top + shown {
+            n: TreeNode = vis[i]
+            ry := self.y + 2 + (i - self._top) * rh
+            ink := t.text
+            if n == self.selected {
+                win.rect(self.x + 2, ry, self.width - 4, rh, _ink(self, t.accent, t))
+                ink = t.accent_text
+            }
+            ax := self.x + 6 + n.depth() * self._ind
+            cy := ry + rh / 2
+            if n.children.length() > 0 {
+                // A small triangle: pointing right (collapsed) or down (expanded).
+                r := 0
+                while r <= 4 {
+                    if n.expanded {
+                        win.line(ax + r, cy - 2 + r, ax + 8 - r, cy - 2 + r, _ink(self, ink, t))
+                    } else {
+                        win.line(ax + 2 + r, cy - 4 + r, ax + 2 + r, cy + 4 - r, _ink(self, ink, t))
+                    }
+                    r = r + 1
+                }
+            }
+            win.text(n.text, ax + 14, ry + (rh - t.line()) / 2, _ink(self, ink, t), scale=t.scale)
+            i = i + 1
+        }
+        _clip_pop(win)
+        if vis.length() > shown {
+            track := self.height - 4
+            bar := _max(8, track * shown / vis.length())
+            by := self.y + 2 + (track - bar) * self._top / _max(1, most)
+            win.rect(self.x + self.width - 5, by, 3, bar, t.muted)
+        }
+    }
+}
+
+// ===== Table =====
+
+---
+Rows of values under column headers: `ui.Table(["Name", "Size"], rows)`,
+each row a List (anything with `.str()`). Columns size to their content
+(or set `widths`); click a row (or Up / Down) to select it, click a
+header to sort by that column (again: reverse). `on_select(index, row)`
+runs when the selection changes — `index` into `rows`, whatever the sort.
+---
+struct Table : Widget {
+    columns: List
+    rows: List
+    widths: List
+    selected: Int
+    on_select: Callable
+    visible_rows: Int
+    sort_column: Int
+    sort_descending: Bool
+    _order: List
+    _top: Int
+    _last_w: List
+
+    define __init(self, columns: List, rows: List, on_select: Callable = null, visible_rows: Int = 8, expand: Bool = false) -> void {
+        super().__init()
+        self.columns = columns
+        self.rows = rows
+        self.widths = []
+        self.selected = -1
+        self.on_select = on_select
+        self.visible_rows = visible_rows
+        self.expand = expand
+        self.sort_column = -1
+        self.sort_descending = false
+        self._order = []
+        self._top = 0
+        self._last_w = []
+        self.focusable = true
+    }
+
+    define _row_h(self) -> Int {
+        return 24
+    }
+
+    define _shown(self) -> Int {
+        return _max(1, (self.height - self._row_h() - 4) / self._row_h())
+    }
+
+    // A whole-number cell ("42", "-7"), compared by value when sorting.
+    define _numeric(self, s: String) -> Bool {
+        if s.length() == 0 { return false }
+        if s.startswith("-") { return s.length() > 1 and s.substring(1, s.length()).is_digit() }
+        return s.is_digit()
+    }
+
+    define _cell(self, r: Int, c: Int) -> String {
+        row: List = self.rows[r]
+        if c >= row.length() { return "" }
+        return row[c].str()
+    }
+
+    // Row indices in display order (sorted when a header was clicked).
+    define _ordered(self) -> List {
+        if self._order.length() != self.rows.length() {
+            order := []
+            i := 0
+            while i < self.rows.length() {
+                order.append(i)
+                i = i + 1
+            }
+            self._order = order
+            if self.sort_column >= 0 { self._sort() }
+        }
+        return self._order
+    }
+
+    // a before b in the current sort: numbers by value, the rest as text.
+    define _before(self, a: Int, b: Int) -> Bool {
+        x := self._cell(a, self.sort_column)
+        y := self._cell(b, self.sort_column)
+        less := x < y
+        greater := x > y
+        if self._numeric(x) and self._numeric(y) {
+            xi := x.to_int()
+            yi := y.to_int()
+            less = xi < yi
+            greater = xi > yi
+        }
+        if self.sort_descending { return greater }
+        return less
+    }
+
+    define _sort(self) -> void {
+        // Insertion sort: stable, and tables are small.
+        order := self._order
+        i := 1
+        while i < order.length() {
+            cur: Int = order[i]
+            j := i - 1
+            while j >= 0 {
+                prev: Int = order[j]
+                if not self._before(cur, prev) { break }
+                order[j + 1] = prev
+                j = j - 1
+            }
+            order[j + 1] = cur
+            i = i + 1
+        }
+    }
+
+    --- Sort by column `c` (`descending` for largest / last first). ---
+    define sort_by(self, c: Int, descending: Bool = false) -> void {
+        self.sort_column = c
+        self.sort_descending = descending
+        self._ordered()
+        self._sort()
+    }
+
+    --- Select row `i` (an index into `rows`; -1: none); runs `on_select` if it changed. ---
+    define select(self, i: Int) -> void {
+        ni := _clamp(i, -1, self.rows.length() - 1)
+        if ni == self.selected { return }
+        self.selected = ni
+        if ni >= 0 {
+            pos := 0
+            order := self._ordered()
+            while pos < order.length() {
+                v: Int = order[pos]
+                if v == ni { break }
+                pos = pos + 1
+            }
+            if pos < self._top { self._top = pos }
+            if pos >= self._top + self._shown() { self._top = pos - self._shown() + 1 }
+            if self.on_select != null { self.on_select(ni, self.rows[ni]) }
+        }
+    }
+
+    define _col_widths(self, t: Theme) -> List {
+        out := []
+        c := 0
+        while c < self.columns.length() {
+            if c < self.widths.length() {
+                out.append(self.widths[c])
+            } else {
+                w := window.text_width(self.columns[c].str(), t.scale) + 3 * t.char_w()
+                r := 0
+                while r < self.rows.length() {
+                    w = _max(w, window.text_width(self._cell(r, c), t.scale) + 2 * t.char_w())
+                    r = r + 1
+                }
+                out.append(_min(w, 40 * t.char_w()))
+            }
+            c = c + 1
+        }
+        return out
+    }
+
+    define measure(self, t: Theme) -> void {
+        total := 0
+        for w in self._col_widths(t) {
+            n: Int = w
+            total = total + n
+        }
+        self.min_w = total + 4
+        self.min_h = (self.visible_rows + 1) * self._row_h() + 4
+    }
+
+    // Display position under py (-1 for the header, -2 outside).
+    define _pos_at(self, py: Int) -> Int {
+        if py < self.y + 2 + self._row_h() { return -1 }
+        p := self._top + (py - self.y - 2 - self._row_h()) / self._row_h()
+        if p >= self.rows.length() { return -2 }
+        return p
+    }
+
+    define _col_at(self, px: Int) -> Int {
+        // Widths of the last draw.
+        x := self.x + 2
+        c := 0
+        while c < self._last_w.length() {
+            w: Int = self._last_w[c]
+            if px >= x and px < x + w { return c }
+            x = x + w
+            c = c + 1
+        }
+        return -1
+    }
+
+    define handle(self, e: window.Event) -> Bool {
+        if not self.enabled { return false }
+        order := self._ordered()
+        if e.kind == "mouse_down" and e.button == 1 {
+            p := self._pos_at(e.y)
+            if p == -1 {
+                c := self._col_at(e.x)
+                if c >= 0 { self.sort_by(c, c == self.sort_column and not self.sort_descending) }
+            } elif p >= 0 {
+                self.select(order[p])
+            }
+            return true
+        }
+        if e.kind == "mouse_up" { return true }
+        if e.kind == "wheel" {
+            most := _max(0, self.rows.length() - self._shown())
+            self._top = _clamp(self._top - e.dy, 0, most)
+            return true
+        }
+        if e.kind != "key_down" or self.rows.length() == 0 { return false }
+        cur := -1
+        i := 0
+        while i < order.length() {
+            v: Int = order[i]
+            if v == self.selected { cur = i }
+            i = i + 1
+        }
+        k := e.key
+        if k == "down" {
+            self.select(order[_min(order.length() - 1, cur + 1)])
+        } elif k == "up" {
+            self.select(order[_max(0, cur - 1)])
+        } elif k == "home" {
+            self.select(order[0])
+        } elif k == "end" {
+            self.select(order[order.length() - 1])
+        } else {
+            return false
+        }
+        return true
+    }
+
+    define draw(self, win: window.Window, t: Theme) -> void {
+        win.rect(self.x, self.y, self.width, self.height, t.input)
+        border := t.border
+        if self.focused { border = t.accent }
+        win.rect(self.x, self.y, self.width, self.height, border, fill=false)
+        ws := self._col_widths(t)
+        self._last_w = ws
+        rh := self._row_h()
+        order := self._ordered()
+        shown := self._shown()
+        most := _max(0, order.length() - shown)
+        if self._top > most { self._top = most }
+        _clip_push(win, self.x + 1, self.y + 1, self.width - 2, self.height - 2)
+        // Header.
+        hy := self.y + 2
+        win.rect(self.x + 2, hy, self.width - 4, rh, t.surface)
+        x := self.x + 2
+        c := 0
+        while c < self.columns.length() {
+            w: Int = ws[c]
+            label := self.columns[c].str()
+            if c == self.sort_column {
+                if self.sort_descending { label = label + " v" } else { label = label + " ^" }
+            }
+            win.text(label, x + t.char_w(), hy + (rh - t.line()) / 2, t.text, scale=t.scale)
+            if c > 0 { win.rect(x, hy + 4, 1, rh - 8, t.border) }
+            x = x + w
+            c = c + 1
+        }
+        win.rect(self.x + 2, hy + rh - 1, self.width - 4, 1, t.border)
+        // Rows.
+        p := self._top
+        while p < order.length() and p < self._top + shown {
+            ri: Int = order[p]
+            ry := hy + rh + (p - self._top) * rh
+            ink := t.text
+            if ri == self.selected {
+                win.rect(self.x + 2, ry, self.width - 4, rh, _ink(self, t.accent, t))
+                ink = t.accent_text
+            } elif (p - self._top) % 2 == 1 {
+                win.rect(self.x + 2, ry, self.width - 4, rh, mix(t.input, t.surface, 50))
+            }
+            x = self.x + 2
+            c = 0
+            while c < self.columns.length() {
+                w: Int = ws[c]
+                cell := self._cell(ri, c)
+                fit := _max(1, (w - 2 * t.char_w()) / t.char_w())
+                if cell.length() > fit { cell = cell.substring(0, fit) }
+                win.text(cell, x + t.char_w(), ry + (rh - t.line()) / 2, _ink(self, ink, t), scale=t.scale)
+                x = x + w
+                c = c + 1
+            }
+            p = p + 1
+        }
+        _clip_pop(win)
+        if order.length() > shown {
+            track := self.height - rh - 4
+            bar := _max(8, track * shown / order.length())
+            by := self.y + 2 + rh + (track - bar) * self._top / _max(1, most)
+            win.rect(self.x + self.width - 5, by, 3, bar, t.muted)
+        }
+    }
+}
+
 // ===== ScrollView =====
 
 // The focused widget inside w (w included), or null.
@@ -2180,6 +2742,343 @@ struct Tabs : Widget {
     }
 }
 
+// ===== Menus =====
+
+---
+One entry of a `ui.Menu`: `text`, `on_click` (no arguments), an optional
+`shortcut` label shown on the right (just text — bind the keys yourself
+with `app.on_key`), and `enabled`. `ui.MenuItem("-")` is a separator.
+---
+struct MenuItem {
+    text: String
+    on_click: Callable
+    shortcut: String
+    enabled: Bool
+
+    define __init(self, text: String, on_click: Callable = null, shortcut: String = "", enabled: Bool = true) -> void {
+        self.text = text
+        self.on_click = on_click
+        self.shortcut = shortcut
+        self.enabled = enabled
+    }
+
+    --- True for a separator line. ---
+    define is_separator(self) -> Bool {
+        return self.text == "-"
+    }
+}
+
+---
+A list of `ui.MenuItem`s that pops up: under a `ui.MenuBar` title, or
+where the user right-clicks a widget whose `context_menu` it is
+(`menu.open_at(x, y)` from code). Click an item, or Up / Down and Enter;
+Escape closes it.
+---
+struct Menu : Widget {
+    items: List
+    is_open: Bool
+    bar: MenuBar
+    _hover: Int
+    _px: Int
+    _py: Int
+    _pw: Int
+    _ph: Int
+
+    define __init(self, items: List) -> void {
+        super().__init()
+        self.items = items
+        self.is_open = false
+        self.bar = null
+        self._hover = -1
+        self._px = 0
+        self._py = 0
+        self._pw = 0
+        self._ph = 0
+    }
+
+    define _item(self, i: Int) -> MenuItem {
+        return self.items[i]
+    }
+
+    define _usable(self, i: Int) -> Bool {
+        if i < 0 or i >= self.items.length() { return false }
+        it := self._item(i)
+        return it.enabled and not it.is_separator()
+    }
+
+    define open_at(self, px: Int, py: Int) -> void {
+        if self.is_open { self.close() }
+        self._px = px
+        self._py = py
+        self._hover = -1
+        self.is_open = true
+        _popups.append(self)
+    }
+
+    --- Hide it. ---
+    define close(self) -> void {
+        if not self.is_open { return }
+        self.is_open = false
+        keep := []
+        for o in _popups {
+            w: Widget = o
+            if w != self { keep.append(w) }
+        }
+        _popups.clear()
+        for w in keep { _popups.append(w) }
+        if self.bar != null { self.bar.close_popup() }
+    }
+
+    define close_popup(self) -> void {
+        self.close()
+    }
+
+    // Run item i: close every popup first (its action may open another).
+    define activate(self, i: Int) -> void {
+        if not self._usable(i) { return }
+        it := self._item(i)
+        _close_popups()
+        if it.on_click != null { it.on_click() }
+    }
+
+    define _row_h(self, i: Int) -> Int {
+        if self._item(i).is_separator() { return 9 }
+        return 24
+    }
+
+    define _row_at(self, py: Int) -> Int {
+        y := self._py + 2
+        i := 0
+        while i < self.items.length() {
+            h := self._row_h(i)
+            if py >= y and py < y + h { return i }
+            y = y + h
+            i = i + 1
+        }
+        return -1
+    }
+
+    define popup_contains(self, px: Int, py: Int) -> Bool {
+        if px >= self._px and py >= self._py and px < self._px + self._pw and py < self._py + self._ph { return true }
+        // A menu bar's title row belongs to its open menu (hover to switch).
+        return self.bar != null and self.bar.contains(px, py)
+    }
+
+    define popup_handle(self, e: window.Event) -> Bool {
+        if self.bar != null and self.bar.contains(e.x, e.y) {
+            return self.bar._while_open(e)
+        }
+        if e.kind == "mouse_move" {
+            r := self._row_at(e.y)
+            if self._usable(r) { self._hover = r } else { self._hover = -1 }
+            return true
+        }
+        if (e.kind == "mouse_up" or e.kind == "mouse_down") and e.button == 1 {
+            r := self._row_at(e.y)
+            if e.kind == "mouse_up" and self._usable(r) { self.activate(r) }
+            return true
+        }
+        return true
+    }
+
+    define _step(self, by: Int) -> void {
+        n := self.items.length()
+        if n == 0 { return }
+        i := self._hover
+        tries := 0
+        while tries < n {
+            i = (i + by + n) % n
+            if self._usable(i) {
+                self._hover = i
+                return
+            }
+            tries = tries + 1
+        }
+    }
+
+    define popup_key(self, e: window.Event) -> Bool {
+        if e.kind != "key_down" { return e.kind == "key_up" or e.kind == "text" }
+        k := e.key
+        if k == "down" {
+            self._step(1)
+        } elif k == "up" {
+            if self._hover < 0 { self._hover = 0 }
+            self._step(-1)
+        } elif k == "return" or k == "keypad_enter" or k == "space" {
+            if self._usable(self._hover) { self.activate(self._hover) } else { self.close() }
+        } elif k == "escape" {
+            self.close()
+        } elif (k == "left" or k == "right") and self.bar != null {
+            self.bar._switch(k == "right")
+        } else {
+            return true          // an open menu takes the keyboard
+        }
+        return true
+    }
+
+    define draw_popup(self, win: window.Window, t: Theme) -> void {
+        cw := t.char_w()
+        widest := 0
+        hint := 0
+        h := 4
+        i := 0
+        while i < self.items.length() {
+            it := self._item(i)
+            widest = _max(widest, window.text_width(it.text, t.scale))
+            hint = _max(hint, window.text_width(it.shortcut, t.scale))
+            h = h + self._row_h(i)
+            i = i + 1
+        }
+        self._pw = widest + 4 * cw + 16
+        if hint > 0 { self._pw = self._pw + hint + 3 * cw }
+        self._ph = h
+        // Keep it on screen.
+        if self._px + self._pw > win.width() { self._px = _max(0, win.width() - self._pw) }
+        if self._py + self._ph > win.height() { self._py = _max(0, self._py - self._ph) }
+        win.rect(self._px + 3, self._py + 3, self._pw, self._ph, mix(t.background, window.black(), 45))
+        win.rect(self._px, self._py, self._pw, self._ph, t.surface)
+        win.rect(self._px, self._py, self._pw, self._ph, t.border, fill=false)
+        y := self._py + 2
+        i = 0
+        while i < self.items.length() {
+            it := self._item(i)
+            rh := self._row_h(i)
+            if it.is_separator() {
+                win.rect(self._px + 6, y + rh / 2, self._pw - 12, 1, t.border)
+            } else {
+                ink := t.text
+                if not it.enabled { ink = mix(t.text, t.surface, 55) }
+                if i == self._hover {
+                    win.rect(self._px + 2, y, self._pw - 4, rh, t.accent)
+                    ink = t.accent_text
+                }
+                ty := y + (rh - t.line()) / 2
+                win.text(it.text, self._px + 2 * cw, ty, ink, scale=t.scale)
+                if it.shortcut.length() > 0 {
+                    sw := window.text_width(it.shortcut, t.scale)
+                    sink := t.muted
+                    if i == self._hover { sink = t.accent_text }
+                    win.text(it.shortcut, self._px + self._pw - 2 * cw - sw, ty, sink, scale=t.scale)
+                }
+            }
+            y = y + rh
+            i = i + 1
+        }
+    }
+}
+
+---
+A row of menu titles, usually at the top of the window:
+`ui.MenuBar(["File", "Edit"], [file_menu, edit_menu])`. Click a title to
+open its menu; while one is open, moving over another title (or Left /
+Right) switches to it.
+---
+struct MenuBar : Widget {
+    titles: List
+    menus: List
+    _open: Int
+    _xs: List
+
+    define __init(self, titles: List, menus: List) -> void {
+        super().__init()
+        self.titles = titles
+        self.menus = menus
+        self._open = -1
+        self._xs = []
+        self.takes_clicks = true
+        for m in menus {
+            mm: Menu = m
+            mm.bar = self
+        }
+    }
+
+    define measure(self, t: Theme) -> void {
+        w := 0
+        for title in self.titles { w = w + window.text_width(title.str(), t.scale) + 2 * t.char_w() }
+        self.min_w = w
+        self.min_h = t.line() + 10
+    }
+
+    define _title_at(self, px: Int) -> Int {
+        i := 0
+        while i + 1 < self._xs.length() {
+            a: Int = self._xs[i]
+            b: Int = self._xs[i + 1]
+            if px >= a and px < b { return i }
+            i = i + 1
+        }
+        return -1
+    }
+
+    --- Open menu `i` under its title (-1: close). ---
+    define open_menu(self, i: Int) -> void {
+        if self._open >= 0 and self._open < self.menus.length() {
+            was: Menu = self.menus[self._open]
+            self._open = -1
+            was.close()
+        }
+        if i < 0 or i >= self.menus.length() or i + 1 >= self._xs.length() { return }
+        m: Menu = self.menus[i]
+        x: Int = self._xs[i]
+        m.open_at(x, self.y + self.height)
+        self._open = i
+    }
+
+    define close_popup(self) -> void {
+        self._open = -1
+    }
+
+    define _switch(self, forward: Bool) -> void {
+        n := self.menus.length()
+        if n == 0 or self._open < 0 { return }
+        nxt := (self._open + n - 1) % n
+        if forward { nxt = (self._open + 1) % n }
+        self.open_menu(nxt)
+    }
+
+    // Mouse over the bar while one of its menus is open.
+    define _while_open(self, e: window.Event) -> Bool {
+        i := self._title_at(e.x)
+        if e.kind == "mouse_move" {
+            if i >= 0 and i != self._open { self.open_menu(i) }
+        } elif e.kind == "mouse_down" and e.button == 1 {
+            if i == self._open or i < 0 { self.open_menu(-1) } else { self.open_menu(i) }
+        }
+        return true
+    }
+
+    define handle(self, e: window.Event) -> Bool {
+        if e.kind == "mouse_down" and e.button == 1 {
+            i := self._title_at(e.x)
+            if i >= 0 { self.open_menu(i) }
+            return true
+        }
+        return e.kind == "mouse_up"
+    }
+
+    define draw(self, win: window.Window, t: Theme) -> void {
+        win.rect(self.x, self.y, self.width, self.height, t.surface)
+        win.rect(self.x, self.y + self.height - 1, self.width, 1, t.border)
+        xs := [self.x]
+        tx := self.x
+        i := 0
+        while i < self.titles.length() {
+            title := self.titles[i].str()
+            w := window.text_width(title, t.scale) + 2 * t.char_w()
+            ink := t.text
+            if i == self._open {
+                win.rect(tx, self.y, w, self.height - 1, t.accent)
+                ink = t.accent_text
+            }
+            win.text(title, tx + t.char_w(), self.y + (self.height - t.line()) / 2, ink, scale=t.scale)
+            tx = tx + w
+            xs.append(tx)
+            i = i + 1
+        }
+        self._xs = xs
+    }
+}
+
 // ===== App =====
 
 // Visible, enabled, focusable widgets in tree order (Tab order).
@@ -2253,6 +3152,8 @@ A window showing a widget tree. Set `root`, then `run()`.
   `on_frame`  — optional `fn()` called once per frame before drawing
   `focus`     — the widget with the keyboard focus (or null)
   `tooltip_delay` — ms the mouse rests on a widget before its tooltip shows
+  `on_key`    — optional `fn(e)` called for every key press, before the
+                focused widget sees it (shortcuts: `if e.ctrl and e.key == "s"`)
 `step()` runs one frame yourself (custom loops, tests).
 ---
 struct App {
@@ -2261,6 +3162,7 @@ struct App {
     theme: Theme
     focus: Widget
     on_frame: Callable
+    on_key: Callable
     tooltip_delay: Int
     _capture: Widget
     _tip: Widget
@@ -2278,6 +3180,7 @@ struct App {
         }
         self.focus = null
         self.on_frame = null
+        self.on_key = null
         self.tooltip_delay = 500
         self._capture = null
         self._tip = null
@@ -2378,6 +3281,22 @@ struct App {
             if self._capture != null { self._capture.handle(e) }
             return
         }
+        // Right-click: the context menu of the innermost widget that has one.
+        if k == "mouse_down" and e.button == 3 {
+            path := []
+            _path(self.root, e.x, e.y, path)
+            i := path.length() - 1
+            while i >= 0 {
+                w: Widget = path[i]
+                if w.context_menu != null and w.enabled {
+                    _close_popups()
+                    w.context_menu.open_at(e.x, e.y)
+                    return
+                }
+                i = i - 1
+            }
+            return
+        }
         if k == "mouse_down" {
             target := _hit(self.root, e.x, e.y)
             if target != null and target.enabled {
@@ -2415,6 +3334,12 @@ struct App {
                 i = i - 1
             }
             return
+        }
+        if k == "key_down" and self.on_key != null { self.on_key(e) }
+        // An open popup that takes keys (a menu) gets them first.
+        if (k == "key_down" or k == "key_up" or k == "text") and _popups.length() > 0 {
+            top: Widget = _popups[_popups.length() - 1]
+            if top.popup_key(e) { return }
         }
         if k == "key_down" and e.key == "tab" and not e.ctrl {
             self._cycle_focus(e.shift)

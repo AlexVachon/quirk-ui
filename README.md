@@ -33,6 +33,26 @@ app.run()
 | `ui.ProgressBar(value=, max=, show_text=)` | A filled bar; set `value` as work progresses |
 | `ui.ListView(items, on_select=, rows=)` | Click / arrows / wheel; `on_select(index, item)` |
 | `ui.Dropdown(options, selected=, on_change=)` | Pick one from a list that opens below; `on_change(index, item)` |
+| `ui.TreeView(roots, on_select=, rows=)` | `ui.TreeNode(text, children, expanded=, data=)`s; click the arrow / double-click / Left / Right to expand and collapse |
+| `ui.Table(columns, rows, on_select=, visible_rows=)` | Rows of values under headers; click a header to sort (again: reverse); `on_select(index, row)` |
+
+## Menus
+
+```quirk
+file := ui.Menu([
+    ui.MenuItem("Open", on_click=open_file, shortcut="Ctrl+O"),
+    ui.MenuItem("-"),                                   // a separator
+    ui.MenuItem("Quit", on_click=fn() { app.close() }),
+])
+app.root = ui.Column([ui.MenuBar(["File"], [file]), content])
+app.on_key = fn(e) { if e.ctrl and e.key == "o" { open_file() } }
+```
+
+Click a title (or move over another while one is open); Up / Down /
+Enter / Escape, Left / Right between menus. `shortcut` is only the label
+— bind the keys with `app.on_key`. Any widget can have a right-click menu:
+`widget.context_menu = ui.Menu([...])`; `menu.open_at(x, y)` opens one
+from code.
 
 Text fields and areas: Shift + arrows / Home / End or a mouse drag
 select; double-click selects a word, triple-click a line; Ctrl+A / C /
@@ -72,7 +92,7 @@ Your own widgets: subclass `ui.Widget` and override `measure`, `draw`,
 
 ## Requirements
 
-- The Quirk compiler 7.27.0+ and `window` 1.2.0+ (clipping, the clipboard).
+- The Quirk compiler 7.30.0+ and `window` 1.2.0+ (clipping, the clipboard).
 - SDL2 for `window` (`sudo apt install libsdl2-2.0-0` / `brew install sdl2`).
 
 Bundled with the compiler at `<QUIRK_HOME>/packages/ui/`, so `use ui`

@@ -1,4 +1,4 @@
-// ui v1.2.0, headless: layout, events routed by App.dispatch, widget
+// ui v1.3.0, headless: layout, events routed by App.dispatch, widget
 // state and drawing. Every test is skipped (passes) without SDL2.
 use window
 use ui
@@ -692,5 +692,183 @@ define test_tabs_switch_pages() -> void {
     test.assert_eq(tabs.selected, 2)
     keym(app, "right")                           // wraps
     test.assert_eq(tabs.selected, 0)
+    app.close()
+}
+
+// ───── v1.3.0: menus, context menus, TreeView, Table ─────
+define right_click(app: ui.App, x: Int, y: Int) -> void {
+    e := ev("mouse_down")
+    e.x = x
+    e.y = y
+    e.button = 3
+    app.dispatch(e)
+}
+
+define test_menu_bar_and_menus() -> void {
+    if not window.available() { return }
+    app := new_app()
+    log := []
+    file := ui.Menu([
+        ui.MenuItem("New", on_click=fn() { log.append("new") }, shortcut="Ctrl+N"),
+        ui.MenuItem("-"),
+        ui.MenuItem("Save", on_click=fn() { log.append("save") }, enabled=false),
+        ui.MenuItem("Quit", on_click=fn() { log.append("quit") }),
+    ])
+    edit := ui.Menu([ui.MenuItem("Copy", on_click=fn() { log.append("copy") })])
+    bar := ui.MenuBar(["File", "Edit"], [file, edit])
+    app.root = ui.Column([bar, ui.Spacer()])
+    app.layout()
+    app.draw()                                    // places the titles
+    click(app, bar.x + 10, bar.y + 5)             // open File
+    test.assert_true(file.is_open)
+    app.draw()                                    // places the menu
+    // Click "New" (first row).
+    row_y := bar.y + bar.height + 2 + 12
+    mouse(app, "mouse_down", bar.x + 20, row_y)
+    mouse(app, "mouse_up", bar.x + 20, row_y)
+    test.assert_eq(log, ["new"])
+    test.assert_false(file.is_open)
+    // Keyboard: open, Down skips the separator and the disabled Save.
+    click(app, bar.x + 10, bar.y + 5)
+    app.draw()
+    keym(app, "down")                             // New
+    keym(app, "down")                             // Quit (separator + Save skipped)
+    keym(app, "return")
+    test.assert_eq(log, ["new", "quit"])
+    // Right switches to the next menu; Escape closes.
+    click(app, bar.x + 10, bar.y + 5)
+    keym(app, "right")
+    test.assert_false(file.is_open)
+    test.assert_true(edit.is_open)
+    keym(app, "escape")
+    test.assert_false(edit.is_open)
+    // Hovering another title while a menu is open switches to it.
+    click(app, bar.x + 10, bar.y + 5)
+    file_w := window.text_width("File") + 16
+    mouse(app, "mouse_move", bar.x + file_w + 10, bar.y + 5)
+    test.assert_true(edit.is_open)
+    test.assert_false(file.is_open)
+    // Clicking the open title again closes it.
+    click(app, bar.x + file_w + 10, bar.y + 5)
+    test.assert_false(edit.is_open)
+    app.close()
+}
+
+define test_context_menu() -> void {
+    if not window.available() { return }
+    app := new_app()
+    hit := ""
+    label := ui.Label("right-click me")
+    label.context_menu = ui.Menu([ui.MenuItem("Rename", on_click=fn() { hit = "rename" })])
+    other := ui.Label("no menu")
+    app.root = ui.Column([label, other], padding=10)
+    app.layout()
+    right_click(app, other.x + 4, other.y + 4)
+    test.assert_false(label.context_menu.is_open)
+    right_click(app, label.x + 4, label.y + 4)
+    test.assert_true(label.context_menu.is_open)
+    app.draw()
+    keym(app, "down")
+    keym(app, "return")
+    test.assert_eq(hit, "rename")
+    // A click elsewhere closes an open context menu without running anything.
+    right_click(app, label.x + 4, label.y + 4)
+    click(app, 390, 290)
+    test.assert_false(label.context_menu.is_open)
+    app.close()
+}
+
+define test_tree_view() -> void {
+    if not window.available() { return }
+    app := new_app()
+    src := ui.TreeNode("src", [ui.TreeNode("main.qk"), ui.TreeNode("util.qk")])
+    docs := ui.TreeNode("docs", [ui.TreeNode("guide.md")])
+    picked := ""
+    tree := ui.TreeView([src, docs], on_select=fn(n) { picked = n.text })
+    app.root = ui.Column([tree], padding=10)
+    app.layout()
+    test.assert_eq(tree.visible_nodes().length(), 2)
+    // Click the arrow of "src": expands it (and selects it).
+    mouse(app, "mouse_down", tree.x + 8, tree.y + 2 + 12)
+    mouse(app, "mouse_up", tree.x + 8, tree.y + 2 + 12)
+    test.assert_true(src.expanded)
+    test.assert_eq(tree.visible_nodes().length(), 4)
+    test.assert_eq(picked, "src")
+    keym(app, "down")
+    test.assert_eq(picked, "main.qk")
+    test.assert_eq(tree.selected.depth(), 1)
+    keym(app, "left")                             // a leaf: up to its parent
+    test.assert_eq(picked, "src")
+    keym(app, "left")                             // collapses
+    test.assert_false(src.expanded)
+    keym(app, "down")
+    keym(app, "right")                            // expands docs
+    test.assert_true(docs.expanded)
+    keym(app, "right")                            // into its first child
+    test.assert_eq(picked, "guide.md")
+    // Collapsing a node whose child is selected selects the node.
+    tree.toggle(docs)
+    test.assert_eq(picked, "docs")
+    // Double-click a row toggles it.
+    mouse(app, "mouse_down", tree.x + 60, tree.y + 2 + 12, 2)
+    mouse(app, "mouse_up", tree.x + 60, tree.y + 2 + 12, 2)
+    test.assert_true(src.expanded)
+    app.close()
+}
+
+define test_table_select_and_sort() -> void {
+    if not window.available() { return }
+    app := new_app()
+    rows := [["banana", 12], ["apple", 3], ["cherry", 120]]
+    picked := ""
+    table := ui.Table(["Fruit", "Count"], rows, on_select=fn(i, row) { picked = row[0].str() })
+    app.root = ui.Column([table], padding=10)
+    app.layout()
+    app.draw()
+    rh := 24
+    // Click the second row (apple).
+    mouse(app, "mouse_down", table.x + 10, table.y + 2 + rh + rh + 12)
+    mouse(app, "mouse_up", table.x + 10, table.y + 2 + rh + rh + 12)
+    test.assert_eq(table.selected, 1)
+    test.assert_eq(picked, "apple")
+    // Sort by Count (numbers by value: 3, 12, 120), Down goes in sorted order.
+    count_x := table.x + 2 + table._last_w[0] + 5
+    mouse(app, "mouse_down", count_x, table.y + 10)
+    mouse(app, "mouse_up", count_x, table.y + 10)
+    test.assert_eq(table.sort_column, 1)
+    test.assert_false(table.sort_descending)
+    keym(app, "down")                             // after apple (3) comes banana (12)
+    test.assert_eq(picked, "banana")
+    keym(app, "down")
+    test.assert_eq(picked, "cherry")
+    // Click the header again: descending.
+    mouse(app, "mouse_down", count_x, table.y + 10)
+    test.assert_true(table.sort_descending)
+    keym(app, "home")
+    test.assert_eq(picked, "cherry")
+    // Sort by name.
+    table.sort_by(0)
+    keym(app, "home")
+    test.assert_eq(picked, "apple")
+    keym(app, "end")
+    test.assert_eq(picked, "cherry")
+    test.assert_eq(table.selected, 2)            // index into rows, whatever the sort
+    app.close()
+}
+
+define test_on_key_runs_first() -> void {
+    if not window.available() { return }
+    app := new_app()
+    saves := 0
+    field := ui.TextInput("x")
+    app.root = ui.Column([field], padding=8)
+    app.on_key = fn(e) {
+        if e.ctrl and e.key == "s" { saves = saves + 1 }
+    }
+    app.layout()
+    click_on(app, field)
+    keym(app, "s", ctrl=true)
+    test.assert_eq(saves, 1)
+    test.assert_eq(field.text, "x")
     app.close()
 }
