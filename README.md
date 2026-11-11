@@ -26,16 +26,20 @@ app.run()
 | `ui.Label(text, color=, align=)` | Text (`"\n"` for more lines) |
 | `ui.Button(text, on_click=)` | Click, or Enter / Space when focused |
 | `ui.Checkbox(text, checked=, on_change=)` | `on_change(checked)` |
+| `ui.RadioGroup(options, selected=, on_change=)` | One of several; click or arrows; `on_change(index, item)` |
 | `ui.TextInput(text=, placeholder=, on_change=, on_submit=, columns=)` | One-line field; Enter submits |
 | `ui.TextArea(text=, rows=, columns=, on_change=)` | Multi-line text; scrolls; Enter starts a line |
 | `ui.Slider(min=, max=, value=, on_change=, step=)` | Drag or arrow keys |
+| `ui.ProgressBar(value=, max=, show_text=)` | A filled bar; set `value` as work progresses |
 | `ui.ListView(items, on_select=, rows=)` | Click / arrows / wheel; `on_select(index, item)` |
 | `ui.Dropdown(options, selected=, on_change=)` | Pick one from a list that opens below; `on_change(index, item)` |
 
 Text fields and areas: Shift + arrows / Home / End or a mouse drag
 select; double-click selects a word, triple-click a line; Ctrl+A / C /
 X / V select all, copy, cut and paste through the system clipboard
-(Cmd on macOS); Ctrl + Left / Right / Backspace / Delete work by word.
+(Cmd on macOS); Ctrl+Z / Ctrl+Y (or Ctrl+Shift+Z) undo and redo —
+typing a word is one step; Ctrl + Left / Right / Backspace / Delete work
+by word.
 From code: `field.selected_text()`, `field.select(start, end)`,
 `field.select_all()`, `field.copy()`, `cut()`, `paste()`.
 
@@ -49,7 +53,9 @@ Tooltips: set `widget.tooltip = "Hint"`, or inline:
 `ui.Row(...)` side by side, `ui.Panel(...)` is a Column on a raised
 surface, `ui.Spacer()` takes free space. `ui.ScrollView(content,
 height=200)` shows `content` in an area that scrolls (wheel, scroll bar,
-or Tab to a widget out of view) when the content is taller. Any widget with `expand = true`
+or Tab to a widget out of view) when the content is taller.
+`ui.Tabs(["General", "Advanced"], [page1, page2])` shows one page under a
+row of tabs (click, Left / Right, or Ctrl+Tab); `tabs.add(title, page)`. Any widget with `expand = true`
 gets a share of its container's free space; `visible = false` hides it,
 `enabled = false` dims it.
 
@@ -66,7 +72,7 @@ Your own widgets: subclass `ui.Widget` and override `measure`, `draw`,
 
 ## Requirements
 
-- The Quirk compiler 7.26.0+ and `window` 1.2.0+ (clipping, the clipboard).
+- The Quirk compiler 7.27.0+ and `window` 1.2.0+ (clipping, the clipboard).
 - SDL2 for `window` (`sudo apt install libsdl2-2.0-0` / `brew install sdl2`).
 
 Bundled with the compiler at `<QUIRK_HOME>/packages/ui/`, so `use ui`

@@ -1,4 +1,4 @@
-// ui v1.1.0, headless: layout, events routed by App.dispatch, widget
+// ui v1.2.0, headless: layout, events routed by App.dispatch, widget
 // state and drawing. Every test is skipped (passes) without SDL2.
 use window
 use ui
@@ -578,5 +578,119 @@ define test_tooltip_after_delay() -> void {
     mouse(app, "mouse_down", mx, my)
     app.draw()
     test.assert_eq(app.win.pixel(tip_px, tip_py), bg)
+    app.close()
+}
+
+// ───── v1.2.0: undo / redo, RadioGroup, ProgressBar, Tabs ─────
+define test_undo_redo_groups_typing() -> void {
+    if not window.available() { return }
+    app := new_app()
+    field := ui.TextInput("")
+    app.root = ui.Column([field], padding=8)
+    app.layout()
+    click_on(app, field)
+    typed(app, "h")
+    typed(app, "i")
+    typed(app, " ")
+    typed(app, "y")
+    typed(app, "o")
+    test.assert_eq(field.text, "hi yo")
+    keym(app, "z", ctrl=true)                  // the word "yo"
+    test.assert_eq(field.text, "hi ")
+    keym(app, "z", ctrl=true)                  // the space
+    test.assert_eq(field.text, "hi")
+    keym(app, "z", ctrl=true)                  // "hi"
+    test.assert_eq(field.text, "")
+    test.assert_false(field.undo())            // nothing left
+    keym(app, "y", ctrl=true)
+    test.assert_eq(field.text, "hi")
+    keym(app, "z", ctrl=true, shift=true)      // Ctrl+Shift+Z redoes too
+    test.assert_eq(field.text, "hi ")
+    // A new edit drops what could be redone.
+    typed(app, "!")
+    test.assert_false(field.redo())
+    keym(app, "backspace")
+    keym(app, "z", ctrl=true)
+    test.assert_eq(field.text, "hi !")
+    // Paste and cut are their own steps.
+    window.set_clipboard("XY")
+    keym(app, "v", ctrl=true)
+    test.assert_eq(field.text, "hi !XY")
+    keym(app, "z", ctrl=true)
+    test.assert_eq(field.text, "hi !")
+    app.close()
+}
+
+define test_radio_group() -> void {
+    if not window.available() { return }
+    app := new_app()
+    picked := ""
+    rg := ui.RadioGroup(["Red", "Green", "Blue"], selected=0, on_change=fn(i, item) { picked = item.str() })
+    app.root = ui.Column([rg], padding=10)
+    app.layout()
+    test.assert_eq(rg.height, 3 * 24)
+    mouse(app, "mouse_down", rg.x + 5, rg.y + 24 * 2 + 10)
+    mouse(app, "mouse_up", rg.x + 5, rg.y + 24 * 2 + 10)
+    test.assert_eq(rg.selected, 2)
+    test.assert_eq(picked, "Blue")
+    test.assert_true(rg.focused)
+    keym(app, "up")
+    test.assert_eq(rg.text(), "Green")
+    keym(app, "home")
+    test.assert_eq(rg.selected, 0)
+    keym(app, "end")
+    keym(app, "down")                           // stays on the last
+    test.assert_eq(rg.selected, 2)
+    app.close()
+}
+
+define test_progress_bar() -> void {
+    if not window.available() { return }
+    app := new_app()
+    app.theme = ui.light()
+    bar := ui.ProgressBar(value=25, max=200, show_text=true)
+    app.root = ui.Column([bar], padding=10)
+    app.layout()
+    test.assert_eq(bar.percent(), 12)
+    bar.value = 500
+    test.assert_eq(bar.percent(), 100)
+    bar.value = 50
+    bar.max = 100
+    app.draw()
+    // Left half filled with the accent, right half not.
+    test.assert_eq(app.win.pixel(bar.x + bar.width / 4, bar.y + 3), window.hex("#2f6fde") % 0x1000000)
+    test.assert_eq(app.win.pixel(bar.x + bar.width * 3 / 4 + 20, bar.y + 3), window.hex("#ffffff") % 0x1000000)
+    app.close()
+}
+
+define test_tabs_switch_pages() -> void {
+    if not window.available() { return }
+    app := new_app()
+    changes := []
+    first := ui.Button("on page one")
+    second := ui.Label("page two")
+    tabs := ui.Tabs(["One", "Two"], [first, second], on_change=fn(i, title) { changes.append(title) })
+    app.root = ui.Column([tabs], padding=10, expand=true)
+    app.layout()
+    app.draw()                                   // places the tab row
+    test.assert_true(tabs.page() == first)
+    test.assert_true(first.y > tabs.y + 20)
+    // Click the second tab (right after the first).
+    one_w := window.text_width("One") + 24
+    mouse(app, "mouse_down", tabs.x + one_w + 10, tabs.y + 10)
+    mouse(app, "mouse_up", tabs.x + one_w + 10, tabs.y + 10)
+    test.assert_eq(tabs.selected, 1)
+    test.assert_eq(changes, ["Two"])
+    // Only the shown page is in the tree (hit-testing, Tab order).
+    test.assert_eq(tabs.children().length(), 1)
+    keym(app, "left")
+    test.assert_eq(tabs.selected, 0)
+    keym(app, "tab", ctrl=true)                  // Ctrl+Tab: next tab, not next widget
+    test.assert_eq(tabs.selected, 1)
+    tabs.add("Three", ui.Label("page three"))
+    keym(app, "right")
+    test.assert_eq(tabs.selected, 2)
+    keym(app, "right")                           // wraps
+    test.assert_eq(tabs.selected, 0)
     app.close()
 }

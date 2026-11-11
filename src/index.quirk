@@ -14,7 +14,9 @@ Widgets:
   `ui.Checkbox(text, checked=false, on_change=fn(on) => ...)`
   `ui.TextInput(text="", placeholder="", on_change=fn(s) => ..., on_submit=fn(s) => ...)`
   `ui.TextArea(text="", rows=6, columns=40, on_change=fn(s) => ...)`
+  `ui.RadioGroup(options, selected=0, on_change=fn(i, item) => ...)`
   `ui.Slider(min=0, max=100, value=50, on_change=fn(v) => ...)`
+  `ui.ProgressBar(value=0, max=100, show_text=false)`
   `ui.ListView(items, on_select=fn(i, item) => ...)`
   `ui.Dropdown(options, selected=0, on_change=fn(i, item) => ...)`
 Layout:
@@ -22,6 +24,7 @@ Layout:
   `ui.Row(children, padding=, spacing=)`    — side by side
   `ui.Panel(children, ...)`                 — a Column on a raised surface
   `ui.ScrollView(content, height=200)`      — scrolls content that's taller
+  `ui.Tabs(titles, pages)`                  — one page at a time under a row of tabs
   `ui.Spacer()`                             — takes the free space
 
 Every widget can `expand` (take a share of its container's free
@@ -32,8 +35,8 @@ Read and change widgets directly: `input.text`, `box.checked`,
 Keyboard: Tab / Shift+Tab move the focus; Enter or Space press the
 focused button or checkbox; arrows move sliders and lists. Text fields:
 Shift + arrows select, Ctrl+A / C / X / V select all, copy, cut and
-paste (system clipboard), Ctrl + arrows move by word; double-click
-selects a word.
+paste (system clipboard), Ctrl+Z / Ctrl+Y undo and redo, Ctrl + arrows
+move by word; double-click selects a word.
 
 Tooltips: `w.tooltip = "..."`, or inline `ui.tooltip(widget, "...")`.
 
@@ -670,6 +673,7 @@ and the editing keys.
   `selected_text()`, `select(start, end)`, `select_all()`
   `insert(s)`        — type `s` at the cursor (replacing the selection)
   `copy()`, `cut()`, `paste()` — through the system clipboard
+  `undo()`, `redo()` — Ctrl+Z, Ctrl+Y / Ctrl+Shift+Z
 Keys: Shift + arrows / Home / End select, Ctrl+A selects everything,
 Ctrl+C / X / V copy, cut and paste (Cmd on macOS), Ctrl + Left / Right
 move by word, Ctrl + Backspace / Delete erase a word. Mouse: click to
@@ -685,6 +689,9 @@ struct TextEdit : Widget {
     _dragging: Bool
     _cw: Int
     _lh: Int
+    _undo: List
+    _redo: List
+    _typing: Bool
 
     define __init(self, text: String = "", on_change: Callable = null) -> void {
         super().__init()
@@ -694,6 +701,9 @@ struct TextEdit : Widget {
         self.on_change = on_change
         self.single_line = false
         self._dragging = false
+        self._undo = []
+        self._redo = []
+        self._typing = false
         self._cw = 8
         self._lh = 16
         self.focusable = true
@@ -701,6 +711,56 @@ struct TextEdit : Widget {
 
     define _changed(self) -> void {
         if self.on_change != null { self.on_change(self.text) }
+    }
+
+    // Remember the state before an edit. A run of typed characters is one
+    // undo step; anything else (paste, delete, Enter) starts a new one.
+    define _snapshot(self, typing: Bool) -> void {
+        if typing and self._typing and self._undo.length() > 0 {
+            return
+        }
+        self._undo.append([self.text, self.cursor, self.anchor])
+        if self._undo.length() > 200 {
+            rest := []
+            i := 1
+            while i < self._undo.length() {
+                rest.append(self._undo[i])
+                i = i + 1
+            }
+            self._undo = rest
+        }
+        self._redo = []
+        self._typing = typing
+    }
+
+    define _restore(self, state: List) -> void {
+        t: String = state[0]
+        c: Int = state[1]
+        a: Int = state[2]
+        self.text = t
+        self.cursor = c
+        self.anchor = a
+        self._fix()
+        self._typing = false
+        self._changed()
+    }
+
+    --- Undo the last edit (Ctrl+Z); false when there's nothing to undo. ---
+    define undo(self) -> Bool {
+        if self._undo.length() == 0 { return false }
+        self._redo.append([self.text, self.cursor, self.anchor])
+        state: List = self._undo.pop()
+        self._restore(state)
+        return true
+    }
+
+    --- Redo what `undo` took back (Ctrl+Y / Ctrl+Shift+Z). ---
+    define redo(self) -> Bool {
+        if self._redo.length() == 0 { return false }
+        self._undo.append([self.text, self.cursor, self.anchor])
+        state: List = self._redo.pop()
+        self._restore(state)
+        return true
     }
 
     // Keep cursor / anchor inside the text (after `text` was set from code).
@@ -758,6 +818,7 @@ struct TextEdit : Widget {
 
     --- Insert `s` at the cursor, as typing would (replaces the selection). ---
     define insert(self, s: String) -> void {
+        self._snapshot(s.length() == 1 and s != "\n" and not self.has_selection() and s != " ")
         self._cut_selection()
         self._fix()
         c := self.cursor
@@ -776,6 +837,7 @@ struct TextEdit : Widget {
     define cut(self) -> void {
         if self.has_selection() {
             self.copy()
+            self._snapshot(false)
             self._cut_selection()
             self._changed()
         }
@@ -794,6 +856,7 @@ struct TextEdit : Widget {
     }
 
     define _move(self, to: Int, grow: Bool) -> void {
+        self._typing = false
         self.cursor = _clamp(to, 0, self.text.length())
         if not grow { self.anchor = self.cursor }
     }
@@ -876,7 +939,11 @@ struct TextEdit : Widget {
         if e.kind != "key_down" { return false }
         k := e.key
         mod := e.ctrl or e.meta
-        if mod and k == "a" {
+        if mod and (k == "y" or (k == "z" and e.shift)) {
+            self.redo()
+        } elif mod and k == "z" {
+            self.undo()
+        } elif mod and k == "a" {
             self.select_all()
         } elif mod and k == "c" {
             self.copy()
@@ -901,6 +968,7 @@ struct TextEdit : Widget {
                 self._move(self.cursor + 1, e.shift)
             }
         } elif k == "backspace" {
+            if self.has_selection() or self.cursor > 0 { self._snapshot(false) }
             if self._cut_selection() {
                 self._changed()
             } elif self.cursor > 0 {
@@ -912,6 +980,7 @@ struct TextEdit : Widget {
                 self._changed()
             }
         } elif k == "delete" {
+            if self.has_selection() or self.cursor < self.text.length() { self._snapshot(false) }
             if self._cut_selection() {
                 self._changed()
             } elif self.cursor < self.text.length() {
@@ -1143,7 +1212,7 @@ struct TextArea : TextEdit {
         if e.kind == "key_down" and (e.key == "up" or e.key == "down" or e.key == "pageup" or e.key == "pagedown") {
             by := 1
             if e.key == "up" { by = -1 }
-            if e.key == "pageup" { by = 0 - self._shown_rows() }
+            if e.key == "pageup" { by = -self._shown_rows() }
             if e.key == "pagedown" { by = self._shown_rows() }
             self._vertical(by, e.shift)
             return true
@@ -1322,6 +1391,146 @@ struct Slider : Widget {
         if self.pressed or self.hovered { knob = t.accent }
         win.circle(kx, cy, _max(6, self.height / 3), _ink(self, knob, t))
         if self.focused { _focus_ring(win, self, t) }
+    }
+}
+
+// ===== RadioGroup =====
+
+---
+One choice out of `options` (anything with `.str()`), shown as a column
+of round buttons. Click one, or Up / Down (Left / Right) when it has the
+focus. `selected` is the index (-1 = none); `on_change(index, item)` runs
+when it changes.
+---
+struct RadioGroup : Widget {
+    options: List
+    selected: Int
+    on_change: Callable
+    _row_h: Int
+
+    define __init(self, options: List, selected: Int = 0, on_change: Callable = null) -> void {
+        super().__init()
+        self.options = options
+        self.selected = _clamp(selected, -1, options.length() - 1)
+        self.on_change = on_change
+        self._row_h = 24
+        self.focusable = true
+    }
+
+    --- The chosen option as text ("" when none). ---
+    define text(self) -> String {
+        if self.selected < 0 or self.selected >= self.options.length() { return "" }
+        return self.options[self.selected].str()
+    }
+
+    --- Choose option `i` (clamped); runs `on_change` if it changed. ---
+    define select(self, i: Int) -> void {
+        if self.options.length() == 0 or not self.enabled { return }
+        ni := _clamp(i, 0, self.options.length() - 1)
+        if ni != self.selected {
+            self.selected = ni
+            if self.on_change != null { self.on_change(ni, self.options[ni]) }
+        }
+    }
+
+    define measure(self, t: Theme) -> void {
+        self._row_h = t.line() + 8
+        widest := 0
+        for o in self.options { widest = _max(widest, window.text_width(o.str(), t.scale)) }
+        self.min_w = t.line() + t.char_w() + widest
+        self.min_h = _max(1, self.options.length()) * self._row_h
+    }
+
+    define handle(self, e: window.Event) -> Bool {
+        if not self.enabled { return false }
+        if e.kind == "mouse_down" and e.button == 1 {
+            row := (e.y - self.y) / self._row_h
+            if row >= 0 and row < self.options.length() { self.select(row) }
+            return true
+        }
+        if e.kind == "mouse_up" { return true }
+        if e.kind == "key_down" {
+            if e.key == "down" or e.key == "right" {
+                self.select(self.selected + 1)
+                return true
+            }
+            if e.key == "up" or e.key == "left" {
+                self.select(_max(0, self.selected - 1))
+                return true
+            }
+            if e.key == "home" {
+                self.select(0)
+                return true
+            }
+            if e.key == "end" {
+                self.select(self.options.length() - 1)
+                return true
+            }
+        }
+        return false
+    }
+
+    define draw(self, win: window.Window, t: Theme) -> void {
+        s := t.line()
+        r := s / 2
+        i := 0
+        while i < self.options.length() {
+            ry := self.y + i * self._row_h
+            cx := self.x + r
+            cy := ry + self._row_h / 2
+            ring := t.border
+            if self.hovered { ring = t.accent }
+            win.circle(cx, cy, r, t.input)
+            win.circle(cx, cy, r, ring, fill=false)
+            if i == self.selected { win.circle(cx, cy, _max(2, r / 2), _ink(self, t.accent, t)) }
+            win.text(self.options[i].str(), self.x + s + t.char_w(), cy - t.line() / 2, _ink(self, t.text, t), scale=t.scale)
+            i = i + 1
+        }
+        if self.focused { _focus_ring(win, self, t) }
+    }
+}
+
+// ===== ProgressBar =====
+
+---
+How far along something is: `value` out of `max` (clamped), drawn as a
+filled bar. `show_text` adds the percentage. Set `value` as work
+progresses.
+---
+struct ProgressBar : Widget {
+    value: Int
+    max: Int
+    show_text: Bool
+
+    define __init(self, value: Int = 0, max: Int = 100, show_text: Bool = false, expand: Bool = false) -> void {
+        super().__init()
+        self.value = value
+        self.max = max
+        self.show_text = show_text
+        self.expand = expand
+    }
+
+    --- Progress from 0 to 100. ---
+    define percent(self) -> Int {
+        if self.max <= 0 { return 0 }
+        return _clamp(self.value * 100 / self.max, 0, 100)
+    }
+
+    define measure(self, t: Theme) -> void {
+        self.min_w = 160
+        self.min_h = t.line() + 4
+    }
+
+    define draw(self, win: window.Window, t: Theme) -> void {
+        win.rect(self.x, self.y, self.width, self.height, t.input)
+        fill := (self.width - 2) * self.percent() / 100
+        if fill > 0 { win.rect(self.x + 1, self.y + 1, fill, self.height - 2, _ink(self, t.accent, t)) }
+        win.rect(self.x, self.y, self.width, self.height, t.border, fill=false)
+        if self.show_text {
+            label := self.percent().str() + "%"
+            tw := window.text_width(label, t.scale)
+            win.text(label, self.x + (self.width - tw) / 2, self.y + (self.height - t.line()) / 2, t.text, scale=t.scale)
+        }
     }
 }
 
@@ -1656,11 +1865,10 @@ struct Dropdown : Widget {
     define close(self) -> void {
         if not self.is_open { return }
         self.is_open = false
-        me: Widget = self
         keep := []
         for o in _popups {
             w: Widget = o
-            if w != me { keep.append(w) }
+            if w != self { keep.append(w) }
         }
         _popups.clear()
         for w in keep { _popups.append(w) }
@@ -1814,6 +2022,161 @@ struct Dropdown : Widget {
             by := self._py + 2 + (track - bar) * self._top / most
             win.rect(self._px + self._pw - 5, by, 3, bar, t.muted)
         }
+    }
+}
+
+// ===== Tabs =====
+
+---
+Pages under a row of tabs: `ui.Tabs(["General", "Advanced"], [page1, page2])`.
+Click a tab, or Left / Right when the tab row has the focus. `selected`
+is the page shown; `on_change(index, title)` runs when it changes;
+`add(title, page)` adds one.
+---
+struct Tabs : Widget {
+    titles: List
+    pages: List
+    selected: Int
+    on_change: Callable
+    _tab_h: Int
+    _xs: List
+
+    define __init(self, titles: List, pages: List, selected: Int = 0, on_change: Callable = null, expand: Bool = false) -> void {
+        super().__init()
+        self.titles = titles
+        self.pages = pages
+        self.selected = _clamp(selected, 0, _max(0, pages.length() - 1))
+        self.on_change = on_change
+        self.expand = expand
+        self._tab_h = 28
+        self._xs = []
+        self.focusable = true
+    }
+
+    --- Add a page with its tab title. ---
+    define add(self, title: String, page: Widget) -> void {
+        self.titles.append(title)
+        self.pages.append(page)
+    }
+
+    --- Show page `i` (clamped); runs `on_change` if it changed. ---
+    define select(self, i: Int) -> void {
+        if self.pages.length() == 0 { return }
+        ni := _clamp(i, 0, self.pages.length() - 1)
+        if ni != self.selected {
+            self.selected = ni
+            if self.on_change != null { self.on_change(ni, self.titles[ni]) }
+        }
+    }
+
+    --- The page being shown (null when there are none). ---
+    define page(self) -> Widget {
+        if self.selected < 0 or self.selected >= self.pages.length() { return null }
+        return self.pages[self.selected]
+    }
+
+    define children(self) -> List {
+        p := self.page()
+        if p == null { return [] }
+        return [p]
+    }
+
+    define measure(self, t: Theme) -> void {
+        self._tab_h = t.line() + 12
+        tw := 0
+        for title in self.titles { tw = tw + window.text_width(title.str(), t.scale) + 3 * t.char_w() }
+        pw := 0
+        ph := 0
+        for pg in self.pages {
+            w: Widget = pg
+            w.measure(t)
+            pw = _max(pw, w.min_w)
+            ph = _max(ph, w.min_h)
+        }
+        self.min_w = _max(tw, pw + 16)
+        self.min_h = self._tab_h + ph + 16
+    }
+
+    define place(self, x: Int, y: Int, width: Int, height: Int) -> void {
+        self.x = x
+        self.y = y
+        self.width = width
+        self.height = height
+        p := self.page()
+        if p != null { p.place(x + 8, y + self._tab_h + 8, width - 16, height - self._tab_h - 16) }
+    }
+
+    // The tab under x, or -1.
+    define _tab_at(self, px: Int) -> Int {
+        i := 0
+        while i + 1 < self._xs.length() {
+            a: Int = self._xs[i]
+            b: Int = self._xs[i + 1]
+            if px >= a and px < b { return i }
+            i = i + 1
+        }
+        return -1
+    }
+
+    define handle(self, e: window.Event) -> Bool {
+        if not self.enabled { return false }
+        if e.kind == "mouse_down" and e.button == 1 {
+            if e.y < self.y + self._tab_h {
+                i := self._tab_at(e.x)
+                if i >= 0 { self.select(i) }
+            }
+            return true
+        }
+        if e.kind == "mouse_up" { return true }
+        if e.kind == "key_down" {
+            if e.key == "right" or (e.key == "tab" and e.ctrl and not e.shift) {
+                self.select((self.selected + 1) % _max(1, self.pages.length()))
+                return true
+            }
+            if e.key == "left" or (e.key == "tab" and e.ctrl and e.shift) {
+                self.select((self.selected + self.pages.length() - 1) % _max(1, self.pages.length()))
+                return true
+            }
+        }
+        return false
+    }
+
+    define draw(self, win: window.Window, t: Theme) -> void {
+        th := self._tab_h
+        win.rect(self.x, self.y + th, self.width, self.height - th, t.surface)
+        win.rect(self.x, self.y + th, self.width, self.height - th, t.border, fill=false)
+        xs := [self.x]
+        tx := self.x
+        i := 0
+        while i < self.titles.length() {
+            title := self.titles[i].str()
+            w := window.text_width(title, t.scale) + 3 * t.char_w()
+            bg := t.background
+            ink := t.muted
+            if i == self.selected {
+                bg = t.surface
+                ink = t.text
+            } elif self.hovered {
+                ink = mix(t.muted, t.text, 40)
+            }
+            win.rect(tx, self.y, w, th + 1, bg)
+            win.rect(tx, self.y, w, th + 1, t.border, fill=false)
+            if i == self.selected {
+                win.rect(tx + 1, self.y + th, w - 2, 1, t.surface)                 // open into the page
+                win.rect(tx, self.y, w, 2, _ink(self, t.accent, t))
+            }
+            win.text(title, tx + (w - window.text_width(title, t.scale)) / 2, self.y + (th - t.line()) / 2,
+                     _ink(self, ink, t), scale=t.scale)
+            tx = tx + w
+            xs.append(tx)
+            i = i + 1
+        }
+        self._xs = xs
+        if self.focused {
+            win.rect(self.x - 2, self.y - 2, tx - self.x + 4, th + 4, t.focus, fill=false)
+        }
+        p := self.page()
+        if p != null and p.visible { p.draw(win, t) }
     }
 }
 
@@ -2053,7 +2416,7 @@ struct App {
             }
             return
         }
-        if k == "key_down" and e.key == "tab" {
+        if k == "key_down" and e.key == "tab" and not e.ctrl {
             self._cycle_focus(e.shift)
             return
         }
