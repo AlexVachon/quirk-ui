@@ -1,7 +1,8 @@
 ---
-Widgets for `window`: labels, buttons, checkboxes, text inputs, sliders
-and lists, laid out in rows and columns, with mouse, keyboard and Tab
-focus handled for you.
+Widgets for `window`: labels, buttons, checkboxes, text fields and areas,
+sliders, lists and dropdowns, laid out in rows, columns and scroll views,
+with mouse, keyboard, Tab focus, the clipboard and tooltips handled for
+you.
 
   `ui.App(title, width, height)`   — a window with a widget tree
   `app.root = ui.Column([...])`    — what it shows
@@ -12,12 +13,15 @@ Widgets:
   `ui.Button(text, on_click=fn() => ...)`
   `ui.Checkbox(text, checked=false, on_change=fn(on) => ...)`
   `ui.TextInput(text="", placeholder="", on_change=fn(s) => ..., on_submit=fn(s) => ...)`
+  `ui.TextArea(text="", rows=6, columns=40, on_change=fn(s) => ...)`
   `ui.Slider(min=0, max=100, value=50, on_change=fn(v) => ...)`
   `ui.ListView(items, on_select=fn(i, item) => ...)`
+  `ui.Dropdown(options, selected=0, on_change=fn(i, item) => ...)`
 Layout:
   `ui.Column(children, padding=, spacing=)` — stacked top to bottom
   `ui.Row(children, padding=, spacing=)`    — side by side
   `ui.Panel(children, ...)`                 — a Column on a raised surface
+  `ui.ScrollView(content, height=200)`      — scrolls content that's taller
   `ui.Spacer()`                             — takes the free space
 
 Every widget can `expand` (take a share of its container's free
@@ -26,7 +30,12 @@ Read and change widgets directly: `input.text`, `box.checked`,
 `slider.value`, `label.text = "Done"`.
 
 Keyboard: Tab / Shift+Tab move the focus; Enter or Space press the
-focused button or checkbox; arrows move sliders and lists.
+focused button or checkbox; arrows move sliders and lists. Text fields:
+Shift + arrows select, Ctrl+A / C / X / V select all, copy, cut and
+paste (system clipboard), Ctrl + arrows move by word; double-click
+selects a word.
+
+Tooltips: `w.tooltip = "..."`, or inline `ui.tooltip(widget, "...")`.
 
 Themes: `ui.dark()` (default) and `ui.light()`, or your own `ui.Theme`.
 
@@ -148,6 +157,7 @@ frame; `min_w` / `min_h` are the size the widget asks for.
   `visible`  — false: not drawn and takes no space
   `enabled`  — false: drawn dimmed, ignores input
   `hovered`, `focused`, `pressed` — set by the App
+  `tooltip`  — text shown when the mouse rests on it ("" = none)
 To make your own widget, subclass it and override `measure`, `draw` and
 `handle` (and `children` for containers).
 ---
@@ -165,6 +175,8 @@ struct Widget {
     hovered: Bool
     focused: Bool
     pressed: Bool
+    tooltip: String
+    takes_clicks: Bool
 
     define __init(self) -> void {
         self.x = 0
@@ -180,6 +192,8 @@ struct Widget {
         self.hovered = false
         self.focused = false
         self.pressed = false
+        self.tooltip = ""
+        self.takes_clicks = false
     }
 
     --- Work out `min_w` / `min_h` (containers measure their children first). ---
@@ -212,6 +226,30 @@ struct Widget {
     define contains(self, px: Int, py: Int) -> Bool {
         return px >= self.x and py >= self.y and px < self.x + self.width and py < self.y + self.height
     }
+
+    // Popups (Dropdown): drawn above everything, offered mouse events first.
+    define draw_popup(self, win: window.Window, t: Theme) -> void {
+    }
+
+    define popup_contains(self, px: Int, py: Int) -> Bool {
+        return false
+    }
+
+    define popup_handle(self, e: window.Event) -> Bool {
+        return false
+    }
+
+    define close_popup(self) -> void {
+    }
+}
+
+---
+Give `w` a tooltip and return it — for building trees inline:
+`ui.tooltip(ui.Button("Save", on_click=save), "Write the file (Ctrl+S)")`.
+---
+define tooltip(w: Widget, text: String) -> Widget {
+    w.tooltip = text
+    return w
 }
 
 // Draw the focus ring around a widget.
@@ -223,6 +261,60 @@ define _focus_ring(win: window.Window, w: Widget, t: Theme) -> void {
 define _ink(w: Widget, color: Int, t: Theme) -> Int {
     if not w.enabled { return mix(color, t.background, 55) }
     return color
+}
+
+// Clip rectangles in force while drawing ([x, y, w, h], innermost last):
+// scroll views nest, so each one draws inside the intersection.
+_clips := []
+
+define _clip_push(win: window.Window, x: Int, y: Int, w: Int, h: Int) -> void {
+    nx := x
+    ny := y
+    nr := x + w
+    nb := y + h
+    if _clips.length() > 0 {
+        top: List = _clips[_clips.length() - 1]
+        tx: Int = top[0]
+        ty: Int = top[1]
+        tw: Int = top[2]
+        th: Int = top[3]
+        nx = _max(nx, tx)
+        ny = _max(ny, ty)
+        nr = _min(nr, tx + tw)
+        nb = _min(nb, ty + th)
+    }
+    cw := _max(0, nr - nx)
+    ch := _max(0, nb - ny)
+    _clips.append([nx, ny, cw, ch])
+    win.clip(nx, ny, cw, ch)
+}
+
+define _clip_pop(win: window.Window) -> void {
+    if _clips.length() > 0 { _clips.pop() }
+    if _clips.length() == 0 {
+        win.unclip()
+    } else {
+        top: List = _clips[_clips.length() - 1]
+        tx: Int = top[0]
+        ty: Int = top[1]
+        tw: Int = top[2]
+        th: Int = top[3]
+        win.clip(tx, ty, tw, th)
+    }
+}
+
+// Open popups (Dropdown lists), topmost last.
+_popups := []
+
+// Selection highlight colour.
+define _sel_color(w: Widget, t: Theme) -> Int {
+    if w.focused { return mix(t.accent, t.input, 55) }
+    return mix(t.border, t.input, 30)
+}
+
+// Letters, digits and _ make up words (double-click, Ctrl+arrows).
+define _wordy(c: String) -> Bool {
+    return c.is_alpha() or c.is_digit() or c == "_"
 }
 
 // ===== Layout =====
@@ -567,88 +659,325 @@ struct Checkbox : Widget {
     }
 }
 
-// ===== TextInput =====
+// ===== Text editing (TextInput, TextArea) =====
 
 ---
-A one-line text field. Type when it has the focus (click it or Tab to
-it); Left / Right / Home / End move the cursor, Backspace / Delete
-erase. `on_change(text)` runs on every edit, `on_submit(text)` on Enter.
-`columns` sets its width in characters.
+What TextInput and TextArea share: the text, a cursor and a selection,
+and the editing keys.
+  `text`             — the contents; set it to replace them
+  `cursor`           — position (0 = before the first character)
+  `has_selection()`, `selection_start()`, `selection_end()`,
+  `selected_text()`, `select(start, end)`, `select_all()`
+  `insert(s)`        — type `s` at the cursor (replacing the selection)
+  `copy()`, `cut()`, `paste()` — through the system clipboard
+Keys: Shift + arrows / Home / End select, Ctrl+A selects everything,
+Ctrl+C / X / V copy, cut and paste (Cmd on macOS), Ctrl + Left / Right
+move by word, Ctrl + Backspace / Delete erase a word. Mouse: click to
+place the cursor, drag or Shift+click to select, double-click selects a
+word, triple-click a line.
 ---
-struct TextInput : Widget {
+struct TextEdit : Widget {
     text: String
-    placeholder: String
     cursor: Int
-    columns: Int
+    anchor: Int
     on_change: Callable
-    on_submit: Callable
-    _scroll: Int
+    single_line: Bool
+    _dragging: Bool
+    _cw: Int
+    _lh: Int
 
-    define __init(self, text: String = "", placeholder: String = "", on_change: Callable = null, on_submit: Callable = null, columns: Int = 20) -> void {
+    define __init(self, text: String = "", on_change: Callable = null) -> void {
         super().__init()
         self.text = text
-        self.placeholder = placeholder
         self.cursor = text.length()
-        self.columns = columns
+        self.anchor = self.cursor
         self.on_change = on_change
-        self.on_submit = on_submit
-        self._scroll = 0
+        self.single_line = false
+        self._dragging = false
+        self._cw = 8
+        self._lh = 16
         self.focusable = true
-    }
-
-    define measure(self, t: Theme) -> void {
-        self.min_w = self.columns * t.char_w() + 16
-        self.min_h = t.line() + 12
     }
 
     define _changed(self) -> void {
         if self.on_change != null { self.on_change(self.text) }
     }
 
-    --- Insert `s` at the cursor, as typing would. ---
+    // Keep cursor / anchor inside the text (after `text` was set from code).
+    define _fix(self) -> void {
+        n := self.text.length()
+        self.cursor = _clamp(self.cursor, 0, n)
+        self.anchor = _clamp(self.anchor, 0, n)
+    }
+
+    --- True when some text is selected. ---
+    define has_selection(self) -> Bool {
+        self._fix()
+        return self.anchor != self.cursor
+    }
+
+    --- Where the selection starts (== `selection_end()` when nothing is selected). ---
+    define selection_start(self) -> Int {
+        self._fix()
+        return _min(self.anchor, self.cursor)
+    }
+
+    --- Where the selection ends. ---
+    define selection_end(self) -> Int {
+        self._fix()
+        return _max(self.anchor, self.cursor)
+    }
+
+    --- The selected text ("" if none). ---
+    define selected_text(self) -> String {
+        return self.text.substring(self.selection_start(), self.selection_end())
+    }
+
+    --- Select from `start` to `end` (the cursor goes to `end`). ---
+    define select(self, start: Int, end: Int) -> void {
+        n := self.text.length()
+        self.anchor = _clamp(start, 0, n)
+        self.cursor = _clamp(end, 0, n)
+    }
+
+    --- Select everything. ---
+    define select_all(self) -> void {
+        self.select(0, self.text.length())
+    }
+
+    // Remove the selected text; true if there was any.
+    define _cut_selection(self) -> Bool {
+        if not self.has_selection() { return false }
+        a := self.selection_start()
+        b := self.selection_end()
+        self.text = self.text.substring(0, a) + self.text.substring(b, self.text.length())
+        self.cursor = a
+        self.anchor = a
+        return true
+    }
+
+    --- Insert `s` at the cursor, as typing would (replaces the selection). ---
     define insert(self, s: String) -> void {
-        self.text = self.text.substring(0, self.cursor) + s + self.text.substring(self.cursor, self.text.length())
-        self.cursor = self.cursor + s.length()
+        self._cut_selection()
+        self._fix()
+        c := self.cursor
+        self.text = self.text.substring(0, c) + s + self.text.substring(c, self.text.length())
+        self.cursor = c + s.length()
+        self.anchor = self.cursor
         self._changed()
     }
 
-    define _visible_chars(self) -> Int {
-        return _max(1, (self.width - 16) / 8)
+    --- Copy the selection to the clipboard. ---
+    define copy(self) -> void {
+        if self.has_selection() { window.set_clipboard(self.selected_text()) }
     }
 
-    define handle(self, e: window.Event) -> Bool {
-        if not self.enabled { return false }
+    --- Copy the selection to the clipboard and remove it. ---
+    define cut(self) -> void {
+        if self.has_selection() {
+            self.copy()
+            self._cut_selection()
+            self._changed()
+        }
+    }
+
+    --- Insert what's on the clipboard. ---
+    define paste(self) -> void {
+        s := self._clean(window.clipboard())
+        if s.length() > 0 { self.insert(s) }
+    }
+
+    // What pasted text becomes: line breaks turn into spaces on one line.
+    define _clean(self, s: String) -> String {
+        if self.single_line { return s.replace("\r\n", " ").replace("\n", " ").replace("\t", " ") }
+        return s.replace("\r\n", "\n")
+    }
+
+    define _move(self, to: Int, grow: Bool) -> void {
+        self.cursor = _clamp(to, 0, self.text.length())
+        if not grow { self.anchor = self.cursor }
+    }
+
+    // Start of the word before i / end of the word after i.
+    define _word_left(self, i: Int) -> Int {
+        j := i
+        while j > 0 and not _wordy(self.text.substring(j - 1, j)) { j = j - 1 }
+        while j > 0 and _wordy(self.text.substring(j - 1, j)) { j = j - 1 }
+        return j
+    }
+
+    define _word_right(self, i: Int) -> Int {
         n := self.text.length()
+        j := i
+        while j < n and not _wordy(self.text.substring(j, j + 1)) { j = j + 1 }
+        while j < n and _wordy(self.text.substring(j, j + 1)) { j = j + 1 }
+        return j
+    }
+
+    // Select the word (or run of other characters) at i.
+    define _select_word(self, i: Int) -> void {
+        n := self.text.length()
+        if n == 0 { return }
+        at := _clamp(i, 0, n - 1)
+        if i == n and i > 0 { at = i - 1 }
+        kind := _wordy(self.text.substring(at, at + 1))
+        a := at
+        b := at + 1
+        while a > 0 and _wordy(self.text.substring(a - 1, a)) == kind { a = a - 1 }
+        while b < n and _wordy(self.text.substring(b, b + 1)) == kind { b = b + 1 }
+        self.select(a, b)
+    }
+
+    // Start / end of the line holding i ("\n"-separated).
+    define _line_start(self, i: Int) -> Int {
+        j := _clamp(i, 0, self.text.length())
+        while j > 0 and self.text.substring(j - 1, j) != "\n" { j = j - 1 }
+        return j
+    }
+
+    define _line_end(self, i: Int) -> Int {
+        n := self.text.length()
+        j := _clamp(i, 0, n)
+        while j < n and self.text.substring(j, j + 1) != "\n" { j = j + 1 }
+        return j
+    }
+
+    --- The text index under the point (px, py) (where a click puts the cursor). ---
+    define index_at(self, px: Int, py: Int) -> Int {
+        return 0
+    }
+
+    // Editing keys and mouse handling both widgets share; true if used.
+    define _edit(self, e: window.Event) -> Bool {
         if e.kind == "text" {
             self.insert(e.text)
             return true
         }
         if e.kind == "mouse_down" and e.button == 1 {
-            col := (e.x - self.x - 8) / 8
-            self.cursor = _clamp(self._scroll + col, 0, n)
+            i := self.index_at(e.x, e.y)
+            if e.clicks >= 3 {
+                self.select(self._line_start(i), self._line_end(i))
+            } elif e.clicks == 2 {
+                self._select_word(i)
+            } else {
+                self._move(i, e.shift)
+                self._dragging = true
+            }
+            return true
+        }
+        if e.kind == "mouse_move" {
+            if self._dragging { self.cursor = self.index_at(e.x, e.y) }
+            return self._dragging
+        }
+        if e.kind == "mouse_up" {
+            self._dragging = false
             return true
         }
         if e.kind != "key_down" { return false }
         k := e.key
-        if k == "left" {
-            self.cursor = _max(0, self.cursor - 1)
+        mod := e.ctrl or e.meta
+        if mod and k == "a" {
+            self.select_all()
+        } elif mod and k == "c" {
+            self.copy()
+        } elif mod and k == "x" {
+            self.cut()
+        } elif mod and k == "v" {
+            self.paste()
+        } elif k == "left" {
+            if self.has_selection() and not e.shift {
+                self._move(self.selection_start(), false)
+            } elif mod {
+                self._move(self._word_left(self.cursor), e.shift)
+            } else {
+                self._move(self.cursor - 1, e.shift)
+            }
         } elif k == "right" {
-            self.cursor = _min(n, self.cursor + 1)
-        } elif k == "home" {
-            self.cursor = 0
-        } elif k == "end" {
-            self.cursor = n
+            if self.has_selection() and not e.shift {
+                self._move(self.selection_end(), false)
+            } elif mod {
+                self._move(self._word_right(self.cursor), e.shift)
+            } else {
+                self._move(self.cursor + 1, e.shift)
+            }
         } elif k == "backspace" {
-            if self.cursor > 0 {
-                self.text = self.text.substring(0, self.cursor - 1) + self.text.substring(self.cursor, n)
-                self.cursor = self.cursor - 1
+            if self._cut_selection() {
+                self._changed()
+            } elif self.cursor > 0 {
+                start := self.cursor - 1
+                if mod { start = self._word_left(self.cursor) }
+                self.text = self.text.substring(0, start) + self.text.substring(self.cursor, self.text.length())
+                self.cursor = start
+                self.anchor = start
                 self._changed()
             }
         } elif k == "delete" {
-            if self.cursor < n {
-                self.text = self.text.substring(0, self.cursor) + self.text.substring(self.cursor + 1, n)
+            if self._cut_selection() {
+                self._changed()
+            } elif self.cursor < self.text.length() {
+                stop := self.cursor + 1
+                if mod { stop = self._word_right(self.cursor) }
+                self.text = self.text.substring(0, self.cursor) + self.text.substring(stop, self.text.length())
+                self.anchor = self.cursor
                 self._changed()
             }
+        } else {
+            return false
+        }
+        return true
+    }
+}
+
+// ===== TextInput =====
+
+---
+A one-line text field. Type when it has the focus (click it or Tab to
+it); editing, selection and copy / paste as described for `TextEdit`.
+`on_change(text)` runs on every edit, `on_submit(text)` on Enter.
+`columns` sets its width in characters.
+---
+struct TextInput : TextEdit {
+    placeholder: String
+    columns: Int
+    on_submit: Callable
+    _scroll: Int
+
+    define __init(self, text: String = "", placeholder: String = "", on_change: Callable = null, on_submit: Callable = null, columns: Int = 20) -> void {
+        super().__init(text, on_change)
+        self.placeholder = placeholder
+        self.columns = columns
+        self.on_submit = on_submit
+        self.single_line = true
+        self._scroll = 0
+    }
+
+    define measure(self, t: Theme) -> void {
+        self._cw = t.char_w()
+        self._lh = t.line()
+        self.min_w = self.columns * t.char_w() + 16
+        self.min_h = t.line() + 12
+    }
+
+    define _visible_chars(self) -> Int {
+        return _max(1, (self.width - 16) / self._cw)
+    }
+
+    define index_at(self, px: Int, py: Int) -> Int {
+        col := (px - self.x - 8 + self._cw / 2) / self._cw
+        if px < self.x + 8 { col = 0 }
+        return _clamp(self._scroll + col, 0, self.text.length())
+    }
+
+    define handle(self, e: window.Event) -> Bool {
+        if not self.enabled { return false }
+        if self._edit(e) { return true }
+        if e.kind != "key_down" { return false }
+        k := e.key
+        n := self.text.length()
+        if k == "home" or (k == "up" and not e.shift) {
+            self._move(0, e.shift)
+        } elif k == "end" or (k == "down" and not e.shift) {
+            self._move(n, e.shift)
         } elif k == "return" or k == "keypad_enter" {
             if self.on_submit != null { self.on_submit(self.text) }
         } else {
@@ -658,6 +987,7 @@ struct TextInput : Widget {
     }
 
     define draw(self, win: window.Window, t: Theme) -> void {
+        self._fix()
         win.rect(self.x, self.y, self.width, self.height, t.input)
         border := t.border
         if self.focused {
@@ -671,6 +1001,7 @@ struct TextInput : Widget {
         // Keep the cursor in view.
         if self.cursor < self._scroll { self._scroll = self.cursor }
         if self.cursor > self._scroll + visible { self._scroll = self.cursor - visible }
+        self._scroll = _clamp(self._scroll, 0, _max(0, self.text.length() - 1))
         ty := self.y + (self.height - t.line()) / 2
         if self.text.length() == 0 {
             if not self.focused and self.placeholder.length() > 0 {
@@ -680,11 +1011,223 @@ struct TextInput : Widget {
             }
         } else {
             end := _min(self.text.length(), self._scroll + visible)
+            if self.has_selection() {
+                a := _max(self.selection_start(), self._scroll)
+                b := _min(self.selection_end(), end)
+                if b > a {
+                    win.rect(self.x + 8 + (a - self._scroll) * cw, ty, (b - a) * cw, t.line(), _sel_color(self, t))
+                }
+            }
             win.text(self.text.substring(self._scroll, end), self.x + 8, ty, _ink(self, t.text, t), scale=t.scale)
         }
         if self.focused and (window.ticks() / 530) % 2 == 0 {
             cx := self.x + 8 + (self.cursor - self._scroll) * cw
             win.rect(cx, ty, _max(1, t.scale), t.line(), t.text)
+        }
+    }
+}
+
+// ===== TextArea =====
+
+---
+Multi-line text. Enter starts a new line; Up / Down / Page Up / Page Down
+move between lines, Home / End to the start / end of the line (with Ctrl:
+of the text). Editing, selection and copy / paste as for `TextEdit`.
+`rows` / `columns` set the size it asks for; it scrolls (wheel, or by
+following the cursor) when the text is bigger. `on_change(text)` runs on
+every edit.
+---
+struct TextArea : TextEdit {
+    rows: Int
+    columns: Int
+    _top: Int
+    _left: Int
+    _goal: Int
+
+    define __init(self, text: String = "", rows: Int = 6, columns: Int = 40, on_change: Callable = null, expand: Bool = false) -> void {
+        super().__init(text, on_change)
+        self.rows = rows
+        self.columns = columns
+        self.expand = expand
+        self._top = 0
+        self._left = 0
+        self._goal = -1
+    }
+
+    --- The text split into lines. ---
+    define lines(self) -> List {
+        return self.text.split("\n")
+    }
+
+    define measure(self, t: Theme) -> void {
+        self._cw = t.char_w()
+        self._lh = t.line()
+        self.min_w = self.columns * t.char_w() + 16
+        self.min_h = self.rows * t.line() + 12
+    }
+
+    define _shown_rows(self) -> Int {
+        return _max(1, (self.height - 12) / self._lh)
+    }
+
+    define _shown_cols(self) -> Int {
+        return _max(1, (self.width - 16) / self._cw)
+    }
+
+    // Line number of index i, and the index where line `ln` starts.
+    define _line_of(self, i: Int) -> Int {
+        ln := 0
+        j := 0
+        stop := _clamp(i, 0, self.text.length())
+        while j < stop {
+            if self.text.substring(j, j + 1) == "\n" { ln = ln + 1 }
+            j = j + 1
+        }
+        return ln
+    }
+
+    define _start_of_line(self, ln: Int) -> Int {
+        if ln <= 0 { return 0 }
+        seen := 0
+        j := 0
+        n := self.text.length()
+        while j < n {
+            if self.text.substring(j, j + 1) == "\n" {
+                seen = seen + 1
+                if seen == ln { return j + 1 }
+            }
+            j = j + 1
+        }
+        return n
+    }
+
+    // Index at column `col` of line `ln` (clamped to the line).
+    define _at(self, ln: Int, col: Int) -> Int {
+        count := self.lines().length()
+        if ln < 0 { return 0 }
+        if ln >= count { return self.text.length() }
+        s := self._start_of_line(ln)
+        e := self._line_end(s)
+        return s + _clamp(col, 0, e - s)
+    }
+
+    define index_at(self, px: Int, py: Int) -> Int {
+        ln := self._top + (py - self.y - 6) / self._lh
+        if py < self.y + 6 { ln = self._top }
+        col := self._left + (px - self.x - 8 + self._cw / 2) / self._cw
+        if px < self.x + 8 { col = self._left }
+        return self._at(ln, col)
+    }
+
+    define _vertical(self, by: Int, grow: Bool) -> void {
+        ln := self._line_of(self.cursor)
+        col := self.cursor - self._line_start(self.cursor)
+        if self._goal < 0 { self._goal = col }
+        target := ln + by
+        if target < 0 {
+            self._move(0, grow)
+        } elif target >= self.lines().length() {
+            self._move(self.text.length(), grow)
+        } else {
+            self._move(self._at(target, self._goal), grow)
+        }
+    }
+
+    define handle(self, e: window.Event) -> Bool {
+        if not self.enabled { return false }
+        if e.kind == "wheel" {
+            most := _max(0, self.lines().length() - self._shown_rows())
+            self._top = _clamp(self._top - e.dy * 3, 0, most)
+            return true
+        }
+        if e.kind == "key_down" and (e.key == "up" or e.key == "down" or e.key == "pageup" or e.key == "pagedown") {
+            by := 1
+            if e.key == "up" { by = -1 }
+            if e.key == "pageup" { by = 0 - self._shown_rows() }
+            if e.key == "pagedown" { by = self._shown_rows() }
+            self._vertical(by, e.shift)
+            return true
+        }
+        self._goal = -1
+        if self._edit(e) { return true }
+        if e.kind != "key_down" { return false }
+        k := e.key
+        mod := e.ctrl or e.meta
+        if k == "home" {
+            if mod { self._move(0, e.shift) } else { self._move(self._line_start(self.cursor), e.shift) }
+        } elif k == "end" {
+            if mod { self._move(self.text.length(), e.shift) } else { self._move(self._line_end(self.cursor), e.shift) }
+        } elif k == "return" or k == "keypad_enter" {
+            self.insert("\n")
+        } else {
+            return false
+        }
+        return true
+    }
+
+    define draw(self, win: window.Window, t: Theme) -> void {
+        self._fix()
+        win.rect(self.x, self.y, self.width, self.height, t.input)
+        border := t.border
+        if self.focused {
+            border = t.accent
+        } elif self.hovered {
+            border = mix(t.border, t.text, 30)
+        }
+        win.rect(self.x, self.y, self.width, self.height, border, fill=false)
+        cw := t.char_w()
+        lh := t.line()
+        rows := self._shown_rows()
+        cols := self._shown_cols()
+        all := self.lines()
+        // Follow the cursor.
+        cl := self._line_of(self.cursor)
+        cc := self.cursor - self._line_start(self.cursor)
+        if self._dragging or self.focused {
+            if cl < self._top { self._top = cl }
+            if cl >= self._top + rows { self._top = cl - rows + 1 }
+            if cc < self._left { self._left = cc }
+            if cc > self._left + cols { self._left = cc - cols }
+        }
+        self._top = _clamp(self._top, 0, _max(0, all.length() - 1))
+        _clip_push(win, self.x + 1, self.y + 1, self.width - 2, self.height - 2)
+        sa := self.selection_start()
+        sb := self.selection_end()
+        start := self._start_of_line(self._top)
+        ln := self._top
+        while ln < all.length() and ln < self._top + rows {
+            line: String = all[ln]
+            ly := self.y + 6 + (ln - self._top) * lh
+            if sb > sa {
+                a := _max(sa, start)
+                b := _min(sb, start + line.length())
+                // A selected line break shows as one extra cell.
+                extra := 0
+                if sb > start + line.length() and sa <= start + line.length() { extra = 1 }
+                ca := a - start - self._left
+                cb := b - start - self._left + extra
+                if cb > ca and (b > a or extra == 1) {
+                    win.rect(self.x + 8 + _max(0, ca) * cw, ly, (cb - _max(0, ca)) * cw, lh, _sel_color(self, t))
+                }
+            }
+            if line.length() > self._left {
+                win.text(line.substring(self._left, _min(line.length(), self._left + cols + 1)), self.x + 8, ly,
+                         _ink(self, t.text, t), scale=t.scale)
+            }
+            start = start + line.length() + 1
+            ln = ln + 1
+        }
+        if self.focused and (window.ticks() / 530) % 2 == 0 and cl >= self._top and cl < self._top + rows {
+            win.rect(self.x + 8 + (cc - self._left) * cw, self.y + 6 + (cl - self._top) * lh, _max(1, t.scale), lh, t.text)
+        }
+        _clip_pop(win)
+        // Scroll indicator when there are more lines than fit.
+        if all.length() > rows {
+            track := self.height - 4
+            bar := _max(8, track * rows / all.length())
+            most := _max(1, all.length() - rows)
+            by := self.y + 2 + (track - bar) * _min(self._top, most) / most
+            win.rect(self.x + self.width - 5, by, 3, bar, t.muted)
         }
     }
 }
@@ -900,6 +1443,380 @@ struct ListView : Widget {
     }
 }
 
+// ===== ScrollView =====
+
+// The focused widget inside w (w included), or null.
+define _focused_in(w: Widget) -> Widget {
+    if not w.visible { return null }
+    if w.focused { return w }
+    for c in w.children() {
+        f := _focused_in(c)
+        if f != null { return f }
+    }
+    return null
+}
+
+---
+Shows `content` (any widget, usually a Column) in an area `height`
+pixels tall that scrolls when the content is taller: mouse wheel, drag
+the scroll bar, or Tab to a widget that's out of view. `offset` is how
+far it's scrolled (pixels). With `expand` it takes its container's free
+height instead.
+---
+struct ScrollView : Widget {
+    content: Widget
+    max_height: Int
+    offset: Int
+    step: Int
+    _drag: Int
+    _seen_focus: Widget
+
+    define __init(self, content: Widget, height: Int = 200, expand: Bool = false) -> void {
+        super().__init()
+        self.content = content
+        self.max_height = height
+        self.expand = expand
+        self.offset = 0
+        self.step = 40
+        self._drag = -1
+        self._seen_focus = null
+        self.takes_clicks = true
+    }
+
+    define children(self) -> List {
+        return [self.content]
+    }
+
+    define _bar_w(self) -> Int {
+        return 10
+    }
+
+    define _most(self) -> Int {
+        return _max(0, self.content.min_h - self.height)
+    }
+
+    --- Scroll so `pixels` from the top of the content is at the top (clamped). ---
+    define scroll_to(self, pixels: Int) -> void {
+        self.offset = _clamp(pixels, 0, self._most())
+    }
+
+    define measure(self, t: Theme) -> void {
+        self.content.measure(t)
+        self.min_w = self.content.min_w + self._bar_w()
+        self.min_h = _min(self.content.min_h, self.max_height)
+    }
+
+    define place(self, x: Int, y: Int, width: Int, height: Int) -> void {
+        self.x = x
+        self.y = y
+        self.width = width
+        self.height = height
+        self.offset = _clamp(self.offset, 0, self._most())
+        cw := width - self._bar_w()
+        ch := _max(self.content.min_h, height)
+        self.content.place(x, y - self.offset, cw, ch)
+        // Newly focused widget out of view (Tab): scroll to it, once.
+        f := _focused_in(self.content)
+        if f != null and f != self._seen_focus {
+            if f.y < y {
+                self.scroll_to(self.offset - (y - f.y))
+            } elif f.y + f.height > y + height {
+                self.scroll_to(self.offset + (f.y + f.height - y - height))
+            }
+            self.content.place(x, y - self.offset, cw, ch)
+        }
+        self._seen_focus = f
+    }
+
+    define _thumb(self) -> List {
+        track := self.height
+        bar := _max(16, track * self.height / _max(1, self.content.min_h))
+        ty := self.y + (track - bar) * self.offset / _max(1, self._most())
+        return [ty, bar]
+    }
+
+    define handle(self, e: window.Event) -> Bool {
+        if e.kind == "wheel" {
+            if self._most() == 0 { return false }
+            self.scroll_to(self.offset - e.dy * self.step)
+            return true
+        }
+        if e.kind == "mouse_down" and e.button == 1 and self._most() > 0 and e.x >= self.x + self.width - self._bar_w() {
+            th := self._thumb()
+            ty: Int = th[0]
+            bar: Int = th[1]
+            if e.y >= ty and e.y < ty + bar {
+                self._drag = e.y - ty
+            } else {
+                // Click on the track: jump there, then drag from the middle.
+                self._drag = bar / 2
+                self._drag_to(e.y)
+            }
+            return true
+        }
+        if e.kind == "mouse_move" and self._drag >= 0 {
+            self._drag_to(e.y)
+            return true
+        }
+        if e.kind == "mouse_up" {
+            self._drag = -1
+            return true
+        }
+        return false
+    }
+
+    define _drag_to(self, py: Int) -> void {
+        th := self._thumb()
+        bar: Int = th[1]
+        room := _max(1, self.height - bar)
+        rel := _clamp(py - self._drag - self.y, 0, room)
+        self.scroll_to(rel * self._most() / room)
+    }
+
+    define draw(self, win: window.Window, t: Theme) -> void {
+        _clip_push(win, self.x, self.y, self.width, self.height)
+        self.content.draw(win, t)
+        _clip_pop(win)
+        if self._most() > 0 {
+            th := self._thumb()
+            ty: Int = th[0]
+            bar: Int = th[1]
+            bx := self.x + self.width - self._bar_w() + 3
+            win.rect(bx, self.y, 4, self.height, mix(t.border, t.background, 40))
+            thumb := t.muted
+            if self._drag >= 0 or self.hovered { thumb = mix(t.muted, t.text, 40) }
+            win.rect(bx, ty, 4, bar, thumb)
+        }
+    }
+}
+
+// ===== Dropdown =====
+
+---
+Pick one of `options` (anything with `.str()`) from a list that opens
+below the field. Click it, or Space / Enter / Alt+Down when focused;
+Up / Down change the choice directly while it's closed. `selected` is
+the index; `on_change(index, item)` runs when it changes.
+---
+struct Dropdown : Widget {
+    options: List
+    selected: Int
+    on_change: Callable
+    is_open: Bool
+    max_rows: Int
+    _hover: Int
+    _top: Int
+    _px: Int
+    _py: Int
+    _pw: Int
+    _ph: Int
+
+    define __init(self, options: List, selected: Int = 0, on_change: Callable = null, expand: Bool = false) -> void {
+        super().__init()
+        self.options = options
+        self.selected = _clamp(selected, 0, _max(0, options.length() - 1))
+        self.on_change = on_change
+        self.expand = expand
+        self.is_open = false
+        self.max_rows = 8
+        self._hover = -1
+        self._top = 0
+        self._px = 0
+        self._py = 0
+        self._pw = 0
+        self._ph = 0
+        self.focusable = true
+    }
+
+    --- The chosen option as text ("" when there are none). ---
+    define text(self) -> String {
+        if self.selected < 0 or self.selected >= self.options.length() { return "" }
+        return self.options[self.selected].str()
+    }
+
+    --- Choose option `i` (clamped); runs `on_change` if it changed. ---
+    define select(self, i: Int) -> void {
+        if self.options.length() == 0 { return }
+        ni := _clamp(i, 0, self.options.length() - 1)
+        if ni != self.selected {
+            self.selected = ni
+            if self.on_change != null { self.on_change(ni, self.options[ni]) }
+        }
+    }
+
+    --- Show the list. ---
+    define open(self) -> void {
+        if self.is_open or not self.enabled or self.options.length() == 0 { return }
+        self.is_open = true
+        self._hover = self.selected
+        _popups.append(self)
+    }
+
+    --- Hide the list. ---
+    define close(self) -> void {
+        if not self.is_open { return }
+        self.is_open = false
+        me: Widget = self
+        keep := []
+        for o in _popups {
+            w: Widget = o
+            if w != me { keep.append(w) }
+        }
+        _popups.clear()
+        for w in keep { _popups.append(w) }
+    }
+
+    define close_popup(self) -> void {
+        self.close()
+    }
+
+    define _rows(self) -> Int {
+        return _max(1, _min(self.max_rows, self.options.length()))
+    }
+
+    define _row_h(self) -> Int {
+        return 24
+    }
+
+    define measure(self, t: Theme) -> void {
+        widest := 4 * t.char_w()
+        for o in self.options { widest = _max(widest, window.text_width(o.str(), t.scale)) }
+        self.min_w = widest + 16 + 3 * t.char_w()
+        self.min_h = t.line() + 12
+    }
+
+    define handle(self, e: window.Event) -> Bool {
+        if not self.enabled { return false }
+        if e.kind == "mouse_down" and e.button == 1 {
+            if self.is_open { self.close() } else { self.open() }
+            return true
+        }
+        if e.kind == "mouse_up" { return true }
+        if e.kind != "key_down" { return false }
+        k := e.key
+        if self.is_open {
+            if k == "down" {
+                self._hover = _min(self.options.length() - 1, self._hover + 1)
+            } elif k == "up" {
+                self._hover = _max(0, self._hover - 1)
+            } elif k == "home" {
+                self._hover = 0
+            } elif k == "end" {
+                self._hover = self.options.length() - 1
+            } elif k == "return" or k == "keypad_enter" or k == "space" {
+                if self._hover >= 0 { self.select(self._hover) }
+                self.close()
+            } elif k == "escape" {
+                self.close()
+            } else {
+                return false
+            }
+            if self._hover < self._top { self._top = self._hover }
+            if self._hover >= self._top + self._rows() { self._top = self._hover - self._rows() + 1 }
+            return true
+        }
+        if k == "space" or k == "return" or k == "keypad_enter" or (k == "down" and e.alt) {
+            self.open()
+        } elif k == "down" {
+            self.select(self.selected + 1)
+        } elif k == "up" {
+            self.select(self.selected - 1)
+        } else {
+            return false
+        }
+        return true
+    }
+
+    define draw(self, win: window.Window, t: Theme) -> void {
+        win.rect(self.x, self.y, self.width, self.height, t.input)
+        border := t.border
+        if self.focused or self.is_open {
+            border = t.accent
+        } elif self.hovered {
+            border = mix(t.border, t.text, 30)
+        }
+        win.rect(self.x, self.y, self.width, self.height, border, fill=false)
+        cw := t.char_w()
+        label := self.text()
+        fit := _max(1, (self.width - 16 - 3 * cw) / cw)
+        if label.length() > fit { label = label.substring(0, fit) }
+        win.text(label, self.x + 8, self.y + (self.height - t.line()) / 2, _ink(self, t.text, t), scale=t.scale)
+        // The arrow: a small filled triangle pointing down.
+        ax := self.x + self.width - 8 - cw
+        ay := self.y + self.height / 2 - 2
+        half := _max(3, cw / 2)
+        r := 0
+        while r <= half {
+            win.line(ax - half + r, ay + r, ax + half - r, ay + r, _ink(self, t.muted, t))
+            r = r + 1
+        }
+    }
+
+    define popup_contains(self, px: Int, py: Int) -> Bool {
+        return px >= self._px and py >= self._py and px < self._px + self._pw and py < self._py + self._ph
+    }
+
+    define popup_handle(self, e: window.Event) -> Bool {
+        rh := self._row_h()
+        if e.kind == "mouse_move" {
+            row := (e.y - self._py - 2) / rh
+            self._hover = _clamp(self._top + row, 0, self.options.length() - 1)
+            return true
+        }
+        if e.kind == "mouse_down" and e.button == 1 {
+            row := (e.y - self._py - 2) / rh
+            i := self._top + row
+            if i >= 0 and i < self.options.length() { self.select(i) }
+            self.close()
+            return true
+        }
+        if e.kind == "wheel" {
+            most := _max(0, self.options.length() - self._rows())
+            self._top = _clamp(self._top - e.dy, 0, most)
+            return true
+        }
+        return e.kind == "mouse_up"
+    }
+
+    define draw_popup(self, win: window.Window, t: Theme) -> void {
+        rh := self._row_h()
+        rows := self._rows()
+        self._pw = self.width
+        self._ph = rows * rh + 4
+        self._px = self.x
+        self._py = self.y + self.height + 2
+        // No room below: open upwards.
+        if self._py + self._ph > win.height() and self.y - self._ph - 2 >= 0 { self._py = self.y - self._ph - 2 }
+        self._top = _clamp(self._top, 0, _max(0, self.options.length() - rows))
+        win.rect(self._px + 3, self._py + 3, self._pw, self._ph, mix(t.background, window.black(), 45))   // shadow
+        win.rect(self._px, self._py, self._pw, self._ph, t.surface)
+        win.rect(self._px, self._py, self._pw, self._ph, t.border, fill=false)
+        fit := _max(1, (self._pw - 16) / t.char_w())
+        i := self._top
+        while i < self.options.length() and i < self._top + rows {
+            ry := self._py + 2 + (i - self._top) * rh
+            ink := t.text
+            if i == self._hover {
+                win.rect(self._px + 2, ry, self._pw - 4, rh, t.accent)
+                ink = t.accent_text
+            } elif i == self.selected {
+                win.rect(self._px + 2, ry, self._pw - 4, rh, mix(t.accent, t.surface, 75))
+            }
+            label := self.options[i].str()
+            if label.length() > fit { label = label.substring(0, fit) }
+            win.text(label, self._px + 8, ry + (rh - t.line()) / 2, ink, scale=t.scale)
+            i = i + 1
+        }
+        if self.options.length() > rows {
+            track := self._ph - 4
+            bar := _max(8, track * rows / self.options.length())
+            most := _max(1, self.options.length() - rows)
+            by := self._py + 2 + (track - bar) * self._top / most
+            win.rect(self._px + self._pw - 5, by, 3, bar, t.muted)
+        }
+    }
+}
+
 // ===== App =====
 
 // Visible, enabled, focusable widgets in tree order (Tab order).
@@ -909,7 +1826,8 @@ define _focus_chain(w: Widget, out: List) -> void {
     for c in w.children() { _focus_chain(c, out) }
 }
 
-// The deepest visible focusable widget at (px, py), or null.
+// The deepest visible widget at (px, py) that takes clicks (focusable,
+// or `takes_clicks`), or null.
 define _hit(w: Widget, px: Int, py: Int) -> Widget {
     if not w.visible or not w.contains(px, py) { return null }
     kids := w.children()
@@ -919,8 +1837,46 @@ define _hit(w: Widget, px: Int, py: Int) -> Widget {
         if found != null { return found }
         i = i - 1
     }
-    if w.focusable { return w }
+    if w.focusable or w.takes_clicks { return w }
     return null
+}
+
+// Every visible widget containing (px, py), outermost first.
+define _path(w: Widget, px: Int, py: Int, out: List) -> void {
+    if not w.visible or not w.contains(px, py) { return }
+    out.append(w)
+    kids := w.children()
+    i := kids.length() - 1
+    while i >= 0 {
+        before := out.length()
+        _path(kids[i], px, py, out)
+        if out.length() > before { return }
+        i = i - 1
+    }
+}
+
+// The deepest widget at (px, py) with a tooltip, or null.
+define _tip_at(w: Widget, px: Int, py: Int) -> Widget {
+    path := []
+    _path(w, px, py, path)
+    i := path.length() - 1
+    while i >= 0 {
+        c: Widget = path[i]
+        if c.tooltip.length() > 0 { return c }
+        i = i - 1
+    }
+    return null
+}
+
+define _close_popups() -> void {
+    while _popups.length() > 0 {
+        o: Widget = _popups[_popups.length() - 1]
+        o.close_popup()
+        if _popups.length() > 0 {
+            top: Widget = _popups[_popups.length() - 1]
+            if top == o { _popups.pop() }
+        }
+    }
 }
 
 define _clear_hover(w: Widget) -> void {
@@ -933,6 +1889,7 @@ A window showing a widget tree. Set `root`, then `run()`.
   `theme`     — colours (`ui.dark()` by default)
   `on_frame`  — optional `fn()` called once per frame before drawing
   `focus`     — the widget with the keyboard focus (or null)
+  `tooltip_delay` — ms the mouse rests on a widget before its tooltip shows
 `step()` runs one frame yourself (custom loops, tests).
 ---
 struct App {
@@ -941,7 +1898,12 @@ struct App {
     theme: Theme
     focus: Widget
     on_frame: Callable
+    tooltip_delay: Int
     _capture: Widget
+    _tip: Widget
+    _tip_since: Int
+    _mx: Int
+    _my: Int
 
     define __init(self, title: String, width: Int, height: Int, theme: Theme = null, resizable: Bool = true, headless: Bool = false) -> void {
         self.win = window.open(title, width, height, resizable=resizable, headless=headless)
@@ -953,7 +1915,13 @@ struct App {
         }
         self.focus = null
         self.on_frame = null
+        self.tooltip_delay = 500
         self._capture = null
+        self._tip = null
+        self._tip_since = 0
+        self._mx = -1
+        self._my = -1
+        _close_popups()
     }
 
     --- True until the window is closed. ---
@@ -968,6 +1936,7 @@ struct App {
 
     --- Give `w` the keyboard focus (null: nobody). ---
     define focus_on(self, w: Widget) -> void {
+        if w != self.focus { _close_popups() }
         if self.focus != null { self.focus.focused = false }
         self.focus = w
         if w != null { w.focused = true }
@@ -1002,6 +1971,43 @@ struct App {
     --- Route one event to the widget it's for (also usable from tests). ---
     define dispatch(self, e: window.Event) -> void {
         k := e.kind
+        if k == "mouse_move" or k == "mouse_down" or k == "mouse_up" or k == "wheel" or k == "key_down" or k == "blur" {
+            if k == "mouse_move" {
+                self._mx = e.x
+                self._my = e.y
+                tip := _tip_at(self.root, e.x, e.y)
+                if tip != self._tip {
+                    self._tip = tip
+                    self._tip_since = window.ticks()
+                }
+            } else {
+                self._tip_since = -1      // hidden until the mouse moves to another widget
+            }
+        }
+        // An open popup gets the mouse first; a click anywhere else closes it.
+        if _popups.length() > 0 and (k == "mouse_move" or k == "mouse_down" or k == "mouse_up" or k == "wheel") {
+            top: Widget = _popups[_popups.length() - 1]
+            px := e.x
+            py := e.y
+            if k == "wheel" {
+                px = self.win.mouse().0
+                py = self.win.mouse().1
+            }
+            if top.popup_contains(px, py) {
+                _clear_hover(self.root)
+                top.popup_handle(e)
+                return
+            }
+            if k == "mouse_down" {
+                owner := _hit(self.root, e.x, e.y)
+                _close_popups()
+                // A click on the popup's own field just closes it.
+                if owner == top {
+                    self._capture = owner
+                    return
+                }
+            }
+        }
         if k == "mouse_move" {
             _clear_hover(self.root)
             over := _hit(self.root, e.x, e.y)
@@ -1012,7 +2018,7 @@ struct App {
         if k == "mouse_down" {
             target := _hit(self.root, e.x, e.y)
             if target != null and target.enabled {
-                self.focus_on(target)
+                if target.focusable { self.focus_on(target) }
                 self._capture = target
                 target.handle(e)
             } else {
@@ -1029,8 +2035,22 @@ struct App {
             return
         }
         if k == "wheel" {
-            target := _hit(self.root, self.win.mouse().0, self.win.mouse().1)
-            if target != null { target.handle(e) }
+            // Innermost widget under the mouse that uses it (a list inside a
+            // scroll view scrolls itself; elsewhere the scroll view scrolls).
+            path := []
+            mx := self.win.mouse().0
+            my := self.win.mouse().1
+            if self._mx >= 0 {
+                mx = self._mx
+                my = self._my
+            }
+            _path(self.root, mx, my, path)
+            i := path.length() - 1
+            while i >= 0 {
+                w: Widget = path[i]
+                if w.enabled and w.handle(e) { return }
+                i = i - 1
+            }
             return
         }
         if k == "key_down" and e.key == "tab" {
@@ -1056,10 +2076,40 @@ struct App {
         if self.on_frame != null { self.on_frame() }
         if not self.win.is_open() { return false }
         self.layout()
-        self.win.clear(self.theme.background)
-        self.root.draw(self.win, self.theme)
+        self.draw()
         self.win.present()
         return true
+    }
+
+    --- Draw the tree, open popups and the tooltip (what `step` shows). ---
+    define draw(self) -> void {
+        t := self.theme
+        _clips.clear()
+        self.win.unclip()
+        self.win.clear(t.background)
+        self.root.draw(self.win, t)
+        for o in _popups {
+            p: Widget = o
+            p.draw_popup(self.win, t)
+        }
+        tip := self._tip
+        if tip != null {
+            if tip.visible and self._tip_since >= 0 and window.ticks() - self._tip_since >= self.tooltip_delay {
+                self._draw_tip(tip.tooltip)
+            }
+        }
+    }
+
+    define _draw_tip(self, text: String) -> void {
+        t := self.theme
+        tw := window.text_width(text, t.scale) + 12
+        th := text.split("\n").length() * t.line() + 8
+        tx := _clamp(self._mx + 12, 0, _max(0, self.win.width() - tw))
+        ty := self._my + 20
+        if ty + th > self.win.height() { ty = _max(0, self._my - th - 4) }
+        self.win.rect(tx, ty, tw, th, mix(t.surface, t.text, 12))
+        self.win.rect(tx, ty, tw, th, t.border, fill=false)
+        self.win.text(text, tx + 6, ty + 4, t.text, scale=t.scale)
     }
 
     --- Run until the window closes, about `fps` frames a second. ---

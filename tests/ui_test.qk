@@ -1,4 +1,4 @@
-// ui v1.0.0, headless: layout, events routed by App.dispatch, widget
+// ui v1.1.0, headless: layout, events routed by App.dispatch, widget
 // state and drawing. Every test is skipped (passes) without SDL2.
 use window
 use ui
@@ -285,4 +285,298 @@ define test_on_frame_runs_each_step() -> void {
 define test_mix() -> void {
     test.assert_eq(ui.mix(window.rgb(0, 0, 0), window.rgb(200, 100, 50), 50), window.rgb(100, 50, 25))
     test.assert_eq(ui.mix(window.red(), window.blue(), 0), window.red())
+}
+
+// ───── v1.1.0: selection, clipboard, TextArea, ScrollView, Dropdown, tooltips ─────
+define keym(app: ui.App, k: String, shift: Bool = false, ctrl: Bool = false) -> void {
+    e := ev("key_down")
+    e.key = k
+    e.shift = shift
+    e.ctrl = ctrl
+    app.dispatch(e)
+}
+
+define mouse(app: ui.App, kind: String, x: Int, y: Int, clicks: Int = 1) -> void {
+    e := ev(kind)
+    e.x = x
+    e.y = y
+    e.button = 1
+    e.clicks = clicks
+    e.left = kind == "mouse_move"
+    app.dispatch(e)
+}
+
+define wheel(app: ui.App, x: Int, y: Int, dy: Int) -> void {
+    mouse(app, "mouse_move", x, y)
+    e := ev("wheel")
+    e.dy = dy
+    app.dispatch(e)
+}
+
+define test_text_input_select_type_over_and_clipboard() -> void {
+    if not window.available() { return }
+    app := new_app()
+    field := ui.TextInput("hello world")
+    app.root = ui.Column([field], padding=8)
+    app.layout()
+    click_on(app, field)
+    keym(app, "home")
+    i := 0
+    while i < 5 {
+        keym(app, "right", shift=true)
+        i = i + 1
+    }
+    test.assert_true(field.has_selection())
+    test.assert_eq(field.selected_text(), "hello")
+    typed(app, "HEY")
+    test.assert_eq(field.text, "HEY world")
+    test.assert_false(field.has_selection())
+    keym(app, "a", ctrl=true)
+    test.assert_eq(field.selected_text(), "HEY world")
+    keym(app, "c", ctrl=true)
+    test.assert_eq(window.clipboard(), "HEY world")
+    keym(app, "delete")
+    test.assert_eq(field.text, "")
+    keym(app, "v", ctrl=true)
+    keym(app, "v", ctrl=true)
+    test.assert_eq(field.text, "HEY worldHEY world")
+    field.select(3, 9)
+    keym(app, "x", ctrl=true)
+    test.assert_eq(window.clipboard(), " world")
+    test.assert_eq(field.text, "HEYHEY world")
+    // Left / Right with a selection collapse it to that end.
+    field.select(1, 4)
+    keym(app, "left")
+    test.assert_eq(field.cursor, 1)
+    test.assert_false(field.has_selection())
+    app.close()
+}
+
+define test_text_input_word_moves() -> void {
+    if not window.available() { return }
+    app := new_app()
+    field := ui.TextInput("one two  three")
+    app.root = ui.Column([field], padding=8)
+    app.layout()
+    click_on(app, field)
+    keym(app, "end")
+    keym(app, "left", ctrl=true)
+    test.assert_eq(field.cursor, 9)
+    keym(app, "left", ctrl=true)
+    test.assert_eq(field.cursor, 4)
+    keym(app, "right", ctrl=true)
+    test.assert_eq(field.cursor, 7)
+    keym(app, "backspace", ctrl=true)
+    test.assert_eq(field.text, "one   three")
+    keym(app, "home")
+    keym(app, "delete", ctrl=true)
+    test.assert_eq(field.text, "   three")
+    app.close()
+}
+
+define test_text_input_mouse_selection_and_one_line_paste() -> void {
+    if not window.available() { return }
+    app := new_app()
+    field := ui.TextInput("alpha beta gamma", columns=30)
+    app.root = ui.Column([field], padding=8)
+    app.layout()
+    cx := field.x + 8 + 8 * 7          // inside "beta"
+    cy := field.y + field.height / 2
+    mouse(app, "mouse_down", cx, cy, 2)
+    mouse(app, "mouse_up", cx, cy, 2)
+    test.assert_eq(field.selected_text(), "beta")
+    // Drag from the start of "alpha" to the end of it.
+    mouse(app, "mouse_down", field.x + 8, cy)
+    mouse(app, "mouse_move", field.x + 8 + 8 * 5, cy)
+    mouse(app, "mouse_up", field.x + 8 + 8 * 5, cy)
+    test.assert_eq(field.selected_text(), "alpha")
+    window.set_clipboard("one\ntwo")
+    field.paste()
+    test.assert_eq(field.text, "one two beta gamma")
+    app.close()
+}
+
+define test_text_area_lines_and_selection() -> void {
+    if not window.available() { return }
+    app := new_app()
+    changes := 0
+    area := ui.TextArea("first\nsecond line\nx", rows=4, on_change=fn(s) { changes = changes + 1 })
+    app.root = ui.Column([area], padding=8)
+    app.layout()
+    click_on(app, area)
+    keym(app, "home", ctrl=true)
+    test.assert_eq(area.cursor, 0)
+    keym(app, "end")
+    test.assert_eq(area.cursor, 5)                 // end of "first"
+    keym(app, "down")
+    test.assert_eq(area.cursor, 11)                // column 5 of "second line"
+    keym(app, "down")
+    test.assert_eq(area.cursor, 19)                // "x" is short: end of it
+    keym(app, "up")
+    test.assert_eq(area.cursor, 11)                // back to column 5
+    keym(app, "home")
+    keym(app, "up", shift=true)
+    test.assert_eq(area.selected_text(), "first\n")
+    keym(app, "return")
+    test.assert_eq(area.text, "\nsecond line\nx")
+    test.assert_eq(area.lines().length(), 3)
+    typed(app, "top")
+    test.assert_eq(area.text, "\ntopsecond line\nx")
+    test.assert_true(changes >= 2)
+    // Triple-click selects a whole line.
+    lx := area.x + 10
+    ly := area.y + 6 + 16 + 4                      // second visible line
+    mouse(app, "mouse_down", lx, ly, 3)
+    mouse(app, "mouse_up", lx, ly, 3)
+    test.assert_eq(area.selected_text(), "topsecond line")
+    app.close()
+}
+
+define test_scroll_view_wheel_clip_and_follow_focus() -> void {
+    if not window.available() { return }
+    app := new_app()
+    buttons := []
+    i := 0
+    while i < 20 {
+        buttons.append(ui.Button("Item " + i.str()))
+        i = i + 1
+    }
+    content := ui.Column(buttons, spacing=4)
+    view := ui.ScrollView(content, height=100)
+    below := ui.Label("below")
+    app.root = ui.Column([view, below], padding=10)
+    app.layout()
+    test.assert_eq(view.height, 100)
+    test.assert_eq(below.y, 10 + 100 + 8)
+    first: ui.Button = buttons[0]
+    test.assert_eq(first.y, 10)
+    wheel(app, view.x + 20, view.y + 20, -2)          // towards you: scroll down
+    app.layout()
+    test.assert_eq(view.offset, 80)
+    test.assert_eq(first.y, 10 - 80)
+    // The content doesn't draw outside the view.
+    app.theme = ui.light()
+    app.draw()
+    test.assert_eq(app.win.pixel(view.x + 20, below.y + 30), app.win.pixel(395, 295))
+    // Tab to the last button: the view scrolls to show it.
+    last: ui.Button = buttons[19]
+    app.focus_on(buttons[18])
+    keym(app, "tab")
+    app.layout()
+    test.assert_true(last.focused)
+    test.assert_eq(last.y + last.height, view.y + view.height)
+    // Wheel up past the top stops at 0.
+    wheel(app, view.x + 20, view.y + 20, 50)
+    app.layout()
+    test.assert_eq(view.offset, 0)
+    app.close()
+}
+
+define test_scroll_view_bar_drag_and_nested_list() -> void {
+    if not window.available() { return }
+    app := new_app()
+    items := []
+    i := 0
+    while i < 30 {
+        items.append("row " + i.str())
+        i = i + 1
+    }
+    lv := ui.ListView(items, rows=3)
+    filler := ui.Spacer(400)
+    view := ui.ScrollView(ui.Column([lv, filler]), height=150)
+    app.root = ui.Column([view], padding=10)
+    app.layout()
+    // Wheel over the list scrolls the list, not the view.
+    wheel(app, lv.x + 10, lv.y + 10, -2)
+    app.layout()
+    test.assert_eq(view.offset, 0)
+    test.assert_eq(lv._top, 2)
+    // Drag the scroll bar to the bottom.
+    bx := view.x + view.width - 4
+    focused_before := app.focus
+    mouse(app, "mouse_down", bx, view.y + 5)
+    mouse(app, "mouse_move", bx, view.y + 400)
+    mouse(app, "mouse_up", bx, view.y + 400)
+    app.layout()
+    test.assert_eq(view.offset, content_most(view))
+    test.assert_true(app.focus == focused_before)   // the bar doesn't take the focus
+    app.close()
+}
+
+define content_most(v: ui.ScrollView) -> Int {
+    return v.content.min_h - v.height
+}
+
+define test_dropdown_mouse_and_keyboard() -> void {
+    if not window.available() { return }
+    app := new_app()
+    picked := ""
+    dd := ui.Dropdown(["Small", "Medium", "Large"], on_change=fn(i, item) { picked = item.str() })
+    other := ui.Button("other")
+    app.root = ui.Column([dd, ui.Spacer(120), other], padding=10)      // clear of the open list
+    app.layout()
+    test.assert_eq(dd.text(), "Small")
+    click_on(app, dd)
+    test.assert_true(dd.is_open)
+    app.draw()                                   // places the list
+    row_y := dd.y + dd.height + 2 + 2 + 24 + 12  // middle of the second row
+    mouse(app, "mouse_move", dd.x + 10, row_y)
+    mouse(app, "mouse_down", dd.x + 10, row_y)
+    mouse(app, "mouse_up", dd.x + 10, row_y)
+    test.assert_false(dd.is_open)
+    test.assert_eq(dd.selected, 1)
+    test.assert_eq(picked, "Medium")
+    // Keyboard: Space opens, Down, Enter picks.
+    keym(app, "space")
+    test.assert_true(dd.is_open)
+    keym(app, "down")
+    keym(app, "return")
+    test.assert_false(dd.is_open)
+    test.assert_eq(dd.text(), "Large")
+    // Closed: Up changes the choice directly; Escape closes an open list.
+    keym(app, "up")
+    test.assert_eq(dd.selected, 1)
+    keym(app, "space")
+    keym(app, "escape")
+    test.assert_false(dd.is_open)
+    // A click elsewhere closes it (and still reaches what was clicked).
+    count := 0
+    other.on_click = fn() { count = count + 1 }
+    click_on(app, dd)
+    test.assert_true(dd.is_open)
+    app.draw()
+    click_on(app, other)
+    test.assert_false(dd.is_open)
+    test.assert_eq(count, 1)
+    // A second click on the field closes it.
+    click_on(app, dd)
+    click_on(app, dd)
+    test.assert_false(dd.is_open)
+    app.close()
+}
+
+define test_tooltip_after_delay() -> void {
+    if not window.available() { return }
+    app := new_app()
+    app.theme = ui.light()
+    label := ui.tooltip(ui.Label("hover me"), "A helpful hint")
+    app.root = ui.Column([label, ui.Spacer()], padding=10)
+    app.layout()
+    mx := label.x + 4
+    my := label.y + 4
+    tip_px := mx + 12 + 2                        // inside the tooltip box
+    tip_py := my + 20 + 2
+    app.tooltip_delay = 100000
+    mouse(app, "mouse_move", mx, my)
+    app.draw()
+    bg := app.win.pixel(395, 295)
+    test.assert_eq(app.win.pixel(tip_px, tip_py), bg)
+    app.tooltip_delay = 0
+    app.draw()
+    test.assert_true(app.win.pixel(tip_px, tip_py) != bg)
+    // A click hides it.
+    mouse(app, "mouse_down", mx, my)
+    app.draw()
+    test.assert_eq(app.win.pixel(tip_px, tip_py), bg)
+    app.close()
 }
