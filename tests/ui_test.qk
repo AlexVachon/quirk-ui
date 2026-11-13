@@ -1,4 +1,4 @@
-// ui v1.3.0, headless: layout, events routed by App.dispatch, widget
+// ui v1.4.0, headless: layout, events routed by App.dispatch, widget
 // state and drawing. Every test is skipped (passes) without SDL2.
 use window
 use ui
@@ -870,5 +870,256 @@ define test_on_key_runs_first() -> void {
     keym(app, "s", ctrl=true)
     test.assert_eq(saves, 1)
     test.assert_eq(field.text, "x")
+    app.close()
+}
+
+// ───── v1.4.0: word wrap, editable cells, ColorPicker, FileDialog, drag and drop ─────
+define test_text_area_word_wrap() -> void {
+    if not window.available() { return }
+    app := new_app()
+    // 10 columns: 10 * 8 + 16 = 96 px wide.
+    area := ui.TextArea("the quick brown fox jumps\nend", rows=6, columns=10, wrap=true)
+    app.root = ui.Row([area, ui.Spacer()], padding=8)
+    app.layout()
+    test.assert_eq(area.width, 96)
+    rows := area.layout()
+    // "the quick " | "brown fox " | "jumps" | "end"
+    test.assert_eq(rows.length(), 4)
+    test.assert_eq(rows[1], [10, 20])
+    test.assert_eq(rows[2], [20, 25])
+    click_on(app, area)
+    keym(app, "home", ctrl=true)
+    keym(app, "end")                              // end of the first visual row
+    test.assert_eq(area.cursor, 9)                // before the space at the wrap
+    keym(app, "down")                             // same column on "brown fox "
+    test.assert_eq(area.cursor, 19)
+    keym(app, "home")
+    test.assert_eq(area.cursor, 10)
+    keym(app, "down")
+    keym(app, "end")
+    test.assert_eq(area.cursor, 25)               // a hard line end: the "\n" itself
+    keym(app, "down")
+    test.assert_eq(area.cursor, 29)               // last row, clamped
+    // A click on the second visual row lands there.
+    mouse(app, "mouse_down", area.x + 8 + 8 * 2, area.y + 6 + 16 + 4)
+    mouse(app, "mouse_up", area.x + 8 + 8 * 2, area.y + 6 + 16 + 4)
+    test.assert_eq(area.cursor, 12)
+    // A word longer than the width is broken at the width.
+    area.text = "abcdefghijklmnop"
+    test.assert_eq(area.layout(), [[0, 10], [10, 16]])
+    // Without wrap: one row per line.
+    area.wrap = false
+    test.assert_eq(area.layout().length(), 1)
+    app.close()
+}
+
+define test_table_edit_cells() -> void {
+    if not window.available() { return }
+    app := new_app()
+    rows := [["banana", 12], ["apple", 3]]
+    edits := []
+    table := ui.Table(["Fruit", "Count"], rows, editable=true, on_edit=fn(i, c, v) { edits.append(v) })
+    app.root = ui.Column([table], padding=10)
+    app.layout()
+    app.draw()
+    rh := 24
+    // Double-click the Count cell of "apple".
+    cx := table.x + 2 + table._last_w[0] + 10
+    cy := table.y + 2 + rh + rh + 12
+    mouse(app, "mouse_down", cx, cy, 2)
+    mouse(app, "mouse_up", cx, cy, 2)
+    test.assert_true(table.editing())
+    test.assert_eq(table.column, 1)
+    app.draw()
+    typed(app, "42")                              // replaces the selected "3"
+    keym(app, "return")
+    test.assert_false(table.editing())
+    test.assert_eq(rows[1][1], 42)
+    test.assert_eq(type(rows[1][1]), "Int")       // an Int column stays an Int
+    test.assert_eq(edits, [42])
+    // Keyboard: Left to the name column, F2, Escape cancels.
+    keym(app, "left")
+    test.assert_eq(table.column, 0)
+    keym(app, "f2")
+    test.assert_true(table.editing())
+    typed(app, "zzz")
+    keym(app, "escape")
+    test.assert_eq(rows[1][0], "apple")
+    // Enter edits; a word in an Int column is kept as text.
+    keym(app, "right")
+    keym(app, "return")
+    typed(app, "many")
+    keym(app, "return")
+    test.assert_eq(rows[1][1], "many")
+    // Not editable: Enter does nothing.
+    table.editable = false
+    keym(app, "return")
+    test.assert_false(table.editing())
+    app.close()
+}
+
+define test_color_picker() -> void {
+    if not window.available() { return }
+    // HSV conversions.
+    test.assert_eq(ui.hsv_to_color(0, 100, 100), window.rgb(255, 0, 0))
+    test.assert_eq(ui.hsv_to_color(120, 100, 100), window.rgb(0, 255, 0))
+    test.assert_eq(ui.hsv_to_color(240, 100, 50), window.rgb(0, 0, 127))
+    test.assert_eq(ui.hsv_to_color(0, 0, 100), window.rgb(255, 255, 255))
+    test.assert_eq(ui.color_to_hsv(window.rgb(255, 0, 0)), [0, 100, 100])
+    test.assert_eq(ui.color_to_hsv(window.rgb(0, 0, 255)), [240, 100, 100])
+    app := new_app()
+    got := []
+    picker := ui.ColorPicker(color=window.rgb(255, 0, 0), on_change=fn(c) { got.append(c) })
+    app.root = ui.Column([picker], padding=10)
+    app.layout()
+    test.assert_eq(picker.hex(), "#ff0000")
+    // Top-left of the square: no saturation, full brightness = white.
+    click(app, picker.x, picker.y)
+    test.assert_eq(picker.hex(), "#ffffff")
+    // Bottom: black.
+    click(app, picker.x + 64, picker.y + 128)
+    test.assert_eq(picker.hex(), "#000000")
+    // Back to full colour, then the hue strip a third of the way: green.
+    click(app, picker.x + 128, picker.y)
+    test.assert_eq(picker.hex(), "#ff0000")
+    click(app, picker.x + 128 + 8 + 5, picker.y + 43)        // 43 / 128 of 360 = hue 120
+    test.assert_eq(picker.hue, 120)
+    test.assert_eq(picker.hex(), "#00ff00")
+    test.assert_eq(got.length(), 4)
+    // Keys: Down darkens.
+    keym(app, "down")
+    test.assert_eq(picker.value, 95)
+    picker.set_color(window.hex("#336699"))
+    test.assert_eq(picker.hex(), "#336699")
+    app.close()
+}
+
+use fs
+
+define test_file_dialog() -> void {
+    if not window.available() { return }
+    root := fs.temp_dir()
+    fs.mkdir(fs.join(root, "sub"))
+    fs.write_text(fs.join(root, "b.qk"), "x")
+    fs.write_text(fs.join(root, "A.qk"), "x")
+    fs.write_text(fs.join(root, "notes.txt"), "x")
+    fs.write_text(fs.join(root, ".hidden"), "x")
+    fs.write_text(fs.join(fs.join(root, "sub"), "inner.qk"), "x")
+    app := new_app()
+    picked := ""
+    cancelled := false
+    dlg := ui.FileDialog(dir=root, filter="*.qk", on_pick=fn(p) { picked = p }, on_cancel=fn() { cancelled = true })
+    app.root = ui.Column([ui.Label("behind")], padding=8)
+    app.layout()
+    dlg.show()
+    test.assert_true(dlg.is_open)
+    // "..", folders first, then filtered files sorted ignoring case; no hidden.
+    test.assert_eq(dlg._list.items, ["..", "sub/", "A.qk", "b.qk"])
+    app.draw()
+    // Keyboard: Down to sub/, Enter opens it.
+    keym(app, "down")
+    keym(app, "return")
+    test.assert_eq(fs.basename(dlg.dir), "sub")
+    test.assert_eq(dlg._list.items, ["..", "inner.qk"])
+    keym(app, "backspace")                        // back up
+    test.assert_eq(dlg._list.items, ["..", "sub/", "A.qk", "b.qk"])
+    // Double-click a file picks it.
+    app.draw()
+    rows_y := dlg._list.y + 2 + 24 * 3 + 12        // fourth row: b.qk
+    mouse(app, "mouse_down", dlg._list.x + 20, rows_y, 2)
+    mouse(app, "mouse_up", dlg._list.x + 20, rows_y, 2)
+    test.assert_false(dlg.is_open)
+    test.assert_eq(fs.basename(picked), "b.qk")
+    // Modal while open: a click "behind" doesn't reach the app.
+    dlg.show()
+    app.draw()
+    click(app, 10, 10)
+    test.assert_true(dlg.is_open)
+    keym(app, "escape")
+    test.assert_true(cancelled)
+    // Save mode: type a name, Enter.
+    saver := ui.FileDialog(mode="save", dir=root, on_pick=fn(p) { picked = p })
+    saver.show()
+    app.draw()
+    typed(app, "out.txt")
+    keym(app, "return")
+    test.assert_eq(picked, fs.join(fs.absolute(root), "out.txt"))
+    // Folder mode lists folders only.
+    chooser := ui.FileDialog(mode="folder", dir=root, on_pick=fn(p) { picked = p })
+    chooser.show()
+    test.assert_eq(chooser._list.items, ["..", "sub/"])
+    app.draw()
+    click(app, chooser._ok.x + 5, chooser._ok.y + 5)      // "Choose" with ".." selected: this folder
+    test.assert_eq(picked, fs.absolute(root))
+    fs.remove_tree(root)
+    app.close()
+}
+
+define test_drag_and_drop() -> void {
+    if not window.available() { return }
+    app := new_app()
+    dropped := []
+    clicks := 0
+    card := ui.Button("card", on_click=fn() { clicks = clicks + 1 })
+    card.on_drag = fn() => "payload"
+    bin := ui.Panel([ui.Label("drop here")])
+    bin.on_drop = fn(data) { dropped.append(data) }
+    app.root = ui.Column([card, ui.Spacer(40), bin], padding=10)
+    app.layout()
+    // A plain click is still a click (moved less than 4 px).
+    click_on(app, card)
+    test.assert_eq(clicks, 1)
+    test.assert_false(app.dragging())
+    // Press on the card, move to the bin, release: dropped, and no click.
+    mouse(app, "mouse_down", card.x + 5, card.y + 5)
+    mouse(app, "mouse_move", card.x + 5, card.y + 30)
+    test.assert_true(app.dragging())
+    app.draw()
+    mouse(app, "mouse_move", bin.x + 10, bin.y + 10)
+    mouse(app, "mouse_up", bin.x + 10, bin.y + 10)
+    test.assert_false(app.dragging())
+    test.assert_eq(dropped, ["payload"])
+    test.assert_eq(clicks, 1)
+    // Dropped where nothing takes it: nothing happens.
+    mouse(app, "mouse_down", card.x + 5, card.y + 5)
+    mouse(app, "mouse_move", 390, 290)
+    mouse(app, "mouse_up", 390, 290)
+    test.assert_eq(dropped.length(), 1)
+    // on_drag returning null cancels the drag.
+    card.on_drag = fn() => null
+    mouse(app, "mouse_down", card.x + 5, card.y + 5)
+    mouse(app, "mouse_move", card.x + 5, card.y + 40)
+    test.assert_false(app.dragging())
+    mouse(app, "mouse_up", card.x + 5, card.y + 40)
+    app.close()
+}
+
+define test_list_view_reorder() -> void {
+    if not window.available() { return }
+    app := new_app()
+    moves := []
+    lv := ui.ListView(["a", "b", "c", "d"], rows=4, reorderable=true, on_reorder=fn(f, t) { moves.append([f, t]) })
+    app.root = ui.Column([lv], padding=10)
+    app.layout()
+    rh := 24
+    // Drag "a" (row 0) onto row 2.
+    mouse(app, "mouse_down", lv.x + 10, lv.y + 2 + 10)
+    mouse(app, "mouse_move", lv.x + 10, lv.y + 2 + rh * 2 + 10)
+    app.draw()
+    mouse(app, "mouse_up", lv.x + 10, lv.y + 2 + rh * 2 + 10)
+    test.assert_eq(lv.items, ["b", "c", "a", "d"])
+    test.assert_eq(lv.selected, 2)
+    test.assert_eq(moves, [[0, 2]])
+    // Drag "d" to the top.
+    mouse(app, "mouse_down", lv.x + 10, lv.y + 2 + rh * 3 + 10)
+    mouse(app, "mouse_move", lv.x + 10, lv.y + 2)
+    mouse(app, "mouse_up", lv.x + 10, lv.y + 2)
+    test.assert_eq(lv.items, ["d", "b", "c", "a"])
+    // Not reorderable: dragging only selects.
+    lv.reorderable = false
+    mouse(app, "mouse_down", lv.x + 10, lv.y + 2 + 10)
+    mouse(app, "mouse_move", lv.x + 10, lv.y + 2 + rh * 3 + 10)
+    mouse(app, "mouse_up", lv.x + 10, lv.y + 2 + rh * 3 + 10)
+    test.assert_eq(lv.items, ["d", "b", "c", "a"])
     app.close()
 }

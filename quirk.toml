@@ -1,8 +1,8 @@
 name          = "ui"
-version       = "1.3.0"
+version       = "1.4.0"
 license       = "MIT"
-description   = "Widgets for window: labels, buttons, checkboxes, radio groups, text fields and areas, sliders, progress bars, lists, trees, tables, dropdowns, tabs, menus, scroll views, tooltips; focus, themes."
+description   = "Widgets for window: labels, buttons, checkboxes, radio groups, text fields and areas, sliders, progress bars, lists, trees, editable tables, dropdowns, tabs, menus, colour pickers, file dialogs, scroll views, tooltips, drag and drop; focus, themes."
 repository    = "github.com/AlexVachon/quirk-ui"
-quirk-version = ">=7.30.0"
+quirk-version = ">=7.31.0"
 
 [deps]

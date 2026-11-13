@@ -13,17 +13,21 @@ Widgets:
   `ui.Button(text, on_click=fn() => ...)`
   `ui.Checkbox(text, checked=false, on_change=fn(on) => ...)`
   `ui.TextInput(text="", placeholder="", on_change=fn(s) => ..., on_submit=fn(s) => ...)`
-  `ui.TextArea(text="", rows=6, columns=40, on_change=fn(s) => ...)`
+  `ui.TextArea(text="", rows=6, columns=40, on_change=fn(s) => ..., wrap=false)`
   `ui.RadioGroup(options, selected=0, on_change=fn(i, item) => ...)`
   `ui.Slider(min=0, max=100, value=50, on_change=fn(v) => ...)`
   `ui.ProgressBar(value=0, max=100, show_text=false)`
   `ui.ListView(items, on_select=fn(i, item) => ...)`
   `ui.TreeView([ui.TreeNode("src", [ui.TreeNode("main.qk")])], on_select=fn(node) => ...)`
-  `ui.Table(["Name", "Size"], rows, on_select=fn(i, row) => ...)`
+  `ui.Table(["Name", "Size"], rows, on_select=fn(i, row) => ..., editable=false)`
+  `ui.ColorPicker(color=, on_change=fn(c) => ...)`
   `ui.Dropdown(options, selected=0, on_change=fn(i, item) => ...)`
 Menus:
   `ui.MenuBar(["File"], [ui.Menu([ui.MenuItem("Open", on_click=fn() => ...)])])`
   `widget.context_menu = ui.Menu([...])` — opened by a right-click
+Dialogs: `ui.FileDialog(mode="open"|"save"|"folder", dir=, on_pick=fn(path) => ...).show()`
+Drag and drop: `source.on_drag = fn() => data`, `target.on_drop = fn(data) => ...`;
+  `ui.ListView(items, reorderable=true)` reorders by dragging
 Layout:
   `ui.Column(children, padding=, spacing=)` — stacked top to bottom
   `ui.Row(children, padding=, spacing=)`    — side by side
@@ -64,6 +68,7 @@ app.run()
 from typing.primitives.string use { String }
 from typing.collections.list use { List }
 use window
+use fs
 
 define _max(a: Int, b: Int) -> Int {
     if a > b { return a }
@@ -167,6 +172,8 @@ frame; `min_w` / `min_h` are the size the widget asks for.
   `hovered`, `focused`, `pressed` — set by the App
   `tooltip`  — text shown when the mouse rests on it ("" = none)
   `context_menu` — a `ui.Menu` opened by a right-click on it (or null)
+  `on_drag`  — `fn() => data`: the widget can be dragged, carrying `data`
+  `on_drop`  — `fn(data)`: something dragged can be dropped on it
 To make your own widget, subclass it and override `measure`, `draw` and
 `handle` (and `children` for containers).
 ---
@@ -187,6 +194,8 @@ struct Widget {
     tooltip: String
     takes_clicks: Bool
     context_menu: Menu
+    on_drag: Callable
+    on_drop: Callable
 
     define __init(self) -> void {
         self.x = 0
@@ -205,6 +214,8 @@ struct Widget {
         self.tooltip = ""
         self.takes_clicks = false
         self.context_menu = null
+        self.on_drag = null
+        self.on_drop = null
     }
 
     --- Work out `min_w` / `min_h` (containers measure their children first). ---
@@ -1120,27 +1131,31 @@ Multi-line text. Enter starts a new line; Up / Down / Page Up / Page Down
 move between lines, Home / End to the start / end of the line (with Ctrl:
 of the text). Editing, selection and copy / paste as for `TextEdit`.
 `rows` / `columns` set the size it asks for; it scrolls (wheel, or by
-following the cursor) when the text is bigger. `on_change(text)` runs on
+following the cursor) when the text is bigger. With `wrap=true` long
+lines break at spaces to fit the width (and the keys move along the
+wrapped lines) instead of scrolling sideways. `on_change(text)` runs on
 every edit.
 ---
 struct TextArea : TextEdit {
     rows: Int
     columns: Int
+    wrap: Bool
     _top: Int
     _left: Int
     _goal: Int
 
-    define __init(self, text: String = "", rows: Int = 6, columns: Int = 40, on_change: Callable = null, expand: Bool = false) -> void {
+    define __init(self, text: String = "", rows: Int = 6, columns: Int = 40, on_change: Callable = null, expand: Bool = false, wrap: Bool = false) -> void {
         super().__init(text, on_change)
         self.rows = rows
         self.columns = columns
+        self.wrap = wrap
         self.expand = expand
         self._top = 0
         self._left = 0
         self._goal = -1
     }
 
-    --- The text split into lines. ---
+    --- The text split into lines (at "\n"; wrapping doesn't count). ---
     define lines(self) -> List {
         return self.text.split("\n")
     }
@@ -1157,72 +1172,105 @@ struct TextArea : TextEdit {
     }
 
     define _shown_cols(self) -> Int {
+        if self.width <= 0 { return self.columns }
         return _max(1, (self.width - 16) / self._cw)
     }
 
-    // Line number of index i, and the index where line `ln` starts.
-    define _line_of(self, i: Int) -> Int {
-        ln := 0
-        j := 0
-        stop := _clamp(i, 0, self.text.length())
-        while j < stop {
-            if self.text.substring(j, j + 1) == "\n" { ln = ln + 1 }
-            j = j + 1
-        }
-        return ln
-    }
-
-    define _start_of_line(self, ln: Int) -> Int {
-        if ln <= 0 { return 0 }
-        seen := 0
-        j := 0
+    --- The rows on screen as [start, end] text ranges ("\n" not included). ---
+    define layout(self) -> List {
+        out := []
         n := self.text.length()
-        while j < n {
-            if self.text.substring(j, j + 1) == "\n" {
-                seen = seen + 1
-                if seen == ln { return j + 1 }
+        cols := self._shown_cols()
+        s := 0
+        while true {
+            e := self._line_end(s)
+            if self.wrap {
+                pos := s
+                while e - pos > cols {
+                    brk := pos + cols
+                    j := brk
+                    while j > pos and self.text.substring(j - 1, j) != " " { j = j - 1 }
+                    if j > pos { brk = j }
+                    out.append([pos, brk])
+                    pos = brk
+                }
+                out.append([pos, e])
+            } else {
+                out.append([s, e])
             }
-            j = j + 1
+            if e >= n { break }
+            s = e + 1
         }
-        return n
+        return out
     }
 
-    // Index at column `col` of line `ln` (clamped to the line).
-    define _at(self, ln: Int, col: Int) -> Int {
-        count := self.lines().length()
-        if ln < 0 { return 0 }
-        if ln >= count { return self.text.length() }
-        s := self._start_of_line(ln)
-        e := self._line_end(s)
-        return s + _clamp(col, 0, e - s)
+    // The row holding index i. At a wrap point the index starts the next row.
+    define _row_of(self, rows: List, i: Int) -> Int {
+        r := 0
+        while r < rows.length() {
+            row: List = rows[r]
+            ra: Int = row[0]
+            rb: Int = row[1]
+            if i >= ra and i < rb { return r }
+            if i == rb {
+                if r + 1 >= rows.length() { return r }
+                nxt: List = rows[r + 1]
+                na: Int = nxt[0]
+                if na != rb { return r }
+            }
+            r = r + 1
+        }
+        return _max(0, rows.length() - 1)
+    }
+
+    // Index at column `col` of row `r` (clamped to the row; a wrapped row
+    // stops before its wrap point, which belongs to the next row).
+    define _at_row(self, rows: List, r: Int, col: Int) -> Int {
+        if r < 0 { return 0 }
+        if r >= rows.length() { return self.text.length() }
+        row: List = rows[r]
+        ra: Int = row[0]
+        rb: Int = row[1]
+        last := rb - ra
+        if r + 1 < rows.length() {
+            nxt: List = rows[r + 1]
+            na: Int = nxt[0]
+            if na == rb and last > 0 { last = last - 1 }
+        }
+        return ra + _clamp(col, 0, last)
     }
 
     define index_at(self, px: Int, py: Int) -> Int {
-        ln := self._top + (py - self.y - 6) / self._lh
-        if py < self.y + 6 { ln = self._top }
-        col := self._left + (px - self.x - 8 + self._cw / 2) / self._cw
-        if px < self.x + 8 { col = self._left }
-        return self._at(ln, col)
+        rows := self.layout()
+        r := self._top + (py - self.y - 6) / self._lh
+        if py < self.y + 6 { r = self._top }
+        left := self._left
+        if self.wrap { left = 0 }
+        col := left + (px - self.x - 8 + self._cw / 2) / self._cw
+        if px < self.x + 8 { col = left }
+        return self._at_row(rows, r, col)
     }
 
     define _vertical(self, by: Int, grow: Bool) -> void {
-        ln := self._line_of(self.cursor)
-        col := self.cursor - self._line_start(self.cursor)
-        if self._goal < 0 { self._goal = col }
-        target := ln + by
+        rows := self.layout()
+        r := self._row_of(rows, self.cursor)
+        row: List = rows[r]
+        ra: Int = row[0]
+        if self._goal < 0 { self._goal = self.cursor - ra }
+        target := r + by
         if target < 0 {
             self._move(0, grow)
-        } elif target >= self.lines().length() {
+        } elif target >= rows.length() {
             self._move(self.text.length(), grow)
         } else {
-            self._move(self._at(target, self._goal), grow)
+            self._move(self._at_row(rows, target, self._goal), grow)
         }
     }
 
     define handle(self, e: window.Event) -> Bool {
         if not self.enabled { return false }
         if e.kind == "wheel" {
-            most := _max(0, self.lines().length() - self._shown_rows())
+            most := _max(0, self.layout().length() - self._shown_rows())
             self._top = _clamp(self._top - e.dy * 3, 0, most)
             return true
         }
@@ -1239,10 +1287,15 @@ struct TextArea : TextEdit {
         if e.kind != "key_down" { return false }
         k := e.key
         mod := e.ctrl or e.meta
-        if k == "home" {
-            if mod { self._move(0, e.shift) } else { self._move(self._line_start(self.cursor), e.shift) }
-        } elif k == "end" {
-            if mod { self._move(self.text.length(), e.shift) } else { self._move(self._line_end(self.cursor), e.shift) }
+        if k == "home" or k == "end" {
+            if mod {
+                if k == "home" { self._move(0, e.shift) } else { self._move(self.text.length(), e.shift) }
+            } else {
+                rows := self.layout()
+                r := self._row_of(rows, self.cursor)
+                if k == "home" { self._move(self._at_row(rows, r, 0), e.shift) }
+                else { self._move(self._at_row(rows, r, 1000000), e.shift) }
+            }
         } elif k == "return" or k == "keypad_enter" {
             self.insert("\n")
         } else {
@@ -1263,55 +1316,66 @@ struct TextArea : TextEdit {
         win.rect(self.x, self.y, self.width, self.height, border, fill=false)
         cw := t.char_w()
         lh := t.line()
-        rows := self._shown_rows()
+        shown := self._shown_rows()
         cols := self._shown_cols()
-        all := self.lines()
+        rows := self.layout()
+        if self.wrap { self._left = 0 }
         // Follow the cursor.
-        cl := self._line_of(self.cursor)
-        cc := self.cursor - self._line_start(self.cursor)
+        cr := self._row_of(rows, self.cursor)
+        crow: List = rows[cr]
+        cra: Int = crow[0]
+        cc := self.cursor - cra
         if self._dragging or self.focused {
-            if cl < self._top { self._top = cl }
-            if cl >= self._top + rows { self._top = cl - rows + 1 }
-            if cc < self._left { self._left = cc }
-            if cc > self._left + cols { self._left = cc - cols }
+            if cr < self._top { self._top = cr }
+            if cr >= self._top + shown { self._top = cr - shown + 1 }
+            if not self.wrap {
+                if cc < self._left { self._left = cc }
+                if cc > self._left + cols { self._left = cc - cols }
+            }
         }
-        self._top = _clamp(self._top, 0, _max(0, all.length() - 1))
+        self._top = _clamp(self._top, 0, _max(0, rows.length() - 1))
         _clip_push(win, self.x + 1, self.y + 1, self.width - 2, self.height - 2)
         sa := self.selection_start()
         sb := self.selection_end()
-        start := self._start_of_line(self._top)
-        ln := self._top
-        while ln < all.length() and ln < self._top + rows {
-            line: String = all[ln]
-            ly := self.y + 6 + (ln - self._top) * lh
+        r := self._top
+        while r < rows.length() and r < self._top + shown {
+            row: List = rows[r]
+            ra: Int = row[0]
+            rb: Int = row[1]
+            ly := self.y + 6 + (r - self._top) * lh
             if sb > sa {
-                a := _max(sa, start)
-                b := _min(sb, start + line.length())
+                a := _max(sa, ra)
+                b := _min(sb, rb)
                 // A selected line break shows as one extra cell.
                 extra := 0
-                if sb > start + line.length() and sa <= start + line.length() { extra = 1 }
-                ca := a - start - self._left
-                cb := b - start - self._left + extra
+                hard := r + 1 >= rows.length()
+                if not hard {
+                    nxt: List = rows[r + 1]
+                    na: Int = nxt[0]
+                    hard = na != rb
+                }
+                if hard and sb > rb and sa <= rb and rb < self.text.length() { extra = 1 }
+                ca := a - ra - self._left
+                cb := b - ra - self._left + extra
                 if cb > ca and (b > a or extra == 1) {
                     win.rect(self.x + 8 + _max(0, ca) * cw, ly, (cb - _max(0, ca)) * cw, lh, _sel_color(self, t))
                 }
             }
-            if line.length() > self._left {
-                win.text(line.substring(self._left, _min(line.length(), self._left + cols + 1)), self.x + 8, ly,
+            if rb - ra > self._left {
+                win.text(self.text.substring(ra + self._left, _min(rb, ra + self._left + cols + 1)), self.x + 8, ly,
                          _ink(self, t.text, t), scale=t.scale)
             }
-            start = start + line.length() + 1
-            ln = ln + 1
+            r = r + 1
         }
-        if self.focused and (window.ticks() / 530) % 2 == 0 and cl >= self._top and cl < self._top + rows {
-            win.rect(self.x + 8 + (cc - self._left) * cw, self.y + 6 + (cl - self._top) * lh, _max(1, t.scale), lh, t.text)
+        if self.focused and (window.ticks() / 530) % 2 == 0 and cr >= self._top and cr < self._top + shown {
+            win.rect(self.x + 8 + (cc - self._left) * cw, self.y + 6 + (cr - self._top) * lh, _max(1, t.scale), lh, t.text)
         }
         _clip_pop(win)
-        // Scroll indicator when there are more lines than fit.
-        if all.length() > rows {
+        // Scroll indicator when there are more rows than fit.
+        if rows.length() > shown {
             track := self.height - 4
-            bar := _max(8, track * rows / all.length())
-            most := _max(1, all.length() - rows)
+            bar := _max(8, track * shown / rows.length())
+            most := _max(1, rows.length() - shown)
             by := self.y + 2 + (track - bar) * _min(self._top, most) / most
             win.rect(self.x + self.width - 5, by, 3, bar, t.muted)
         }
@@ -1563,17 +1627,54 @@ struct ListView : Widget {
     selected: Int
     rows: Int
     on_select: Callable
+    reorderable: Bool
+    on_reorder: Callable
     _top: Int
+    _press: Int
+    _drop: Int
 
-    define __init(self, items: List, on_select: Callable = null, rows: Int = 6, expand: Bool = false) -> void {
+    define __init(self, items: List, on_select: Callable = null, rows: Int = 6, expand: Bool = false, reorderable: Bool = false, on_reorder: Callable = null) -> void {
         super().__init()
         self.items = items
         self.selected = -1
         self.rows = rows
         self.on_select = on_select
+        self.reorderable = reorderable
+        self.on_reorder = on_reorder
         self._top = 0
+        self._press = -1
+        self._drop = -1
         self.focusable = true
         self.expand = expand
+    }
+
+    --- Move item `src` to position `dst` (both indices into `items`). ---
+    define move_item(self, src: Int, dst: Int) -> void {
+        n := self.items.length()
+        if src < 0 or src >= n or dst < 0 or dst >= n or src == dst { return }
+        item := self.items[src]
+        rest := []
+        i := 0
+        while i < n {
+            if i != src { rest.append(self.items[i]) }
+            i = i + 1
+        }
+        out := []
+        i = 0
+        while i < rest.length() {
+            if i == dst { out.append(item) }
+            out.append(rest[i])
+            i = i + 1
+        }
+        if dst >= rest.length() { out.append(item) }
+        self.items.clear()
+        for v in out { self.items.append(v) }
+        if self.selected == src { self.selected = dst }
+        if self.on_reorder != null { self.on_reorder(src, dst) }
+    }
+
+    define _row_at_y(self, py: Int) -> Int {
+        return _clamp(self._top + (py - self.y - 2) / self._row_h(), 0, _max(0, self.items.length() - 1))
     }
 
     define _row_h(self) -> Int {
@@ -1607,7 +1708,22 @@ struct ListView : Widget {
         if not self.enabled { return false }
         if e.kind == "mouse_down" and e.button == 1 {
             row := (e.y - self.y - 2) / self._row_h()
-            if row >= 0 and self._top + row < self.items.length() { self.select(self._top + row) }
+            if row >= 0 and self._top + row < self.items.length() {
+                self.select(self._top + row)
+                self._press = self._top + row
+            }
+            return true
+        }
+        if e.kind == "mouse_move" and self.reorderable and self._press >= 0 and e.left {
+            self._drop = self._row_at_y(e.y)
+            return true
+        }
+        if e.kind == "mouse_up" {
+            if self.reorderable and self._press >= 0 and self._drop >= 0 and self._drop != self._press {
+                self.move_item(self._press, self._drop)
+            }
+            self._press = -1
+            self._drop = -1
             return true
         }
         if e.kind == "wheel" {
@@ -1659,6 +1775,12 @@ struct ListView : Widget {
             win.text(label, self.x + 8, ry + (rh - t.line()) / 2, _ink(self, ink, t), scale=t.scale)
             i = i + 1
         }
+        // Where a dragged row would land.
+        if self._drop >= 0 and self._drop != self._press and self._drop >= self._top and self._drop < self._top + shown {
+            ly := self.y + 2 + (self._drop - self._top) * rh
+            if self._drop > self._press { ly = ly + rh }
+            win.rect(self.x + 2, ly - 1, self.width - 4, 2, t.focus)
+        }
         // Scroll indicator when not everything fits.
         if self.items.length() > shown {
             track := self.height - 4
@@ -1666,6 +1788,223 @@ struct ListView : Widget {
             by := self.y + 2 + (track - bar) * self._top / _max(1, most)
             win.rect(self.x + self.width - 5, by, 3, bar, t.muted)
         }
+    }
+}
+
+// ===== ColorPicker =====
+
+// HSV (hue 0-359, saturation / value 0-100) <-> colour, in whole numbers.
+define hsv_to_color(h: Int, sat: Int, v: Int) -> Int {
+    hh := ((h % 360) + 360) % 360
+    ss := _clamp(sat, 0, 100)
+    vv := _clamp(v, 0, 100)
+    c := vv * ss * 255 / 10000                 // chroma, 0-255
+    seg := hh / 60
+    f := hh % 60
+    x := c * (seg % 2 * 60 + (1 - 2 * (seg % 2)) * f) / 60
+    m := vv * 255 / 100 - c
+    r := 0
+    g := 0
+    b := 0
+    if seg == 0 {
+        r = c
+        g = x
+    } elif seg == 1 {
+        r = x
+        g = c
+    } elif seg == 2 {
+        g = c
+        b = x
+    } elif seg == 3 {
+        g = x
+        b = c
+    } elif seg == 4 {
+        r = x
+        b = c
+    } else {
+        r = c
+        b = x
+    }
+    return window.rgb(r + m, g + m, b + m)
+}
+
+--- [hue 0-359, saturation 0-100, value 0-100] of a colour. ---
+define color_to_hsv(color: Int) -> List {
+    ch := window.channels(color)
+    r: Int = ch[0]
+    g: Int = ch[1]
+    b: Int = ch[2]
+    mx := _max(r, _max(g, b))
+    mn := _min(r, _min(g, b))
+    d := mx - mn
+    h := 0
+    if d > 0 {
+        if mx == r {
+            h = (60 * (g - b) / d + 360) % 360
+        } elif mx == g {
+            h = 60 * (b - r) / d + 120
+        } else {
+            h = 60 * (r - g) / d + 240
+        }
+    }
+    sat := 0
+    if mx > 0 { sat = d * 100 / mx }
+    return [h, sat, mx * 100 / 255]
+}
+
+---
+Pick a colour: a square for saturation (left → right) and brightness
+(bottom → top), a strip for the hue, and a swatch with its hex code.
+Drag in either, or with the focus: Left / Right saturation, Up / Down
+brightness, Page Up / Page Down hue. `color` is the colour (a `window`
+colour Int); `on_change(color)` runs when it changes.
+---
+struct ColorPicker : Widget {
+    color: Int
+    hue: Int
+    saturation: Int
+    value: Int
+    on_change: Callable
+    size: Int
+    _drag: Int
+
+    define __init(self, color: Int = window.rgb(76, 141, 255), on_change: Callable = null, size: Int = 128) -> void {
+        super().__init()
+        self.on_change = on_change
+        self.size = size
+        self._drag = 0
+        self.focusable = true
+        self.set_color(color)
+    }
+
+    --- Set the colour from code (no `on_change`). ---
+    define set_color(self, color: Int) -> void {
+        hsv := color_to_hsv(color)
+        h: Int = hsv[0]
+        sv: Int = hsv[1]
+        vv: Int = hsv[2]
+        self.hue = h
+        self.saturation = sv
+        self.value = vv
+        self.color = window.rgb(window.channels(color)[0], window.channels(color)[1], window.channels(color)[2])
+    }
+
+    --- The colour as "#rrggbb". ---
+    define hex(self) -> String {
+        ch := window.channels(self.color)
+        digits := "0123456789abcdef"
+        out := "#"
+        for v in [ch[0], ch[1], ch[2]] {
+            n: Int = v
+            out = out + digits.substring(n / 16, n / 16 + 1) + digits.substring(n % 16, n % 16 + 1)
+        }
+        return out
+    }
+
+    define _set_hsv(self, h: Int, sat: Int, v: Int) -> void {
+        self.hue = ((h % 360) + 360) % 360
+        self.saturation = _clamp(sat, 0, 100)
+        self.value = _clamp(v, 0, 100)
+        nc := hsv_to_color(self.hue, self.saturation, self.value)
+        if nc != self.color {
+            self.color = nc
+            if self.on_change != null { self.on_change(nc) }
+        }
+    }
+
+    define _strip_x(self) -> Int {
+        return self.x + self.size + 8
+    }
+
+    define measure(self, t: Theme) -> void {
+        self.min_w = self.size + 8 + 16
+        self.min_h = self.size + 8 + t.line() + 8
+    }
+
+    define _from_point(self, px: Int, py: Int) -> void {
+        if self._drag == 1 {
+            sat := _clamp(px - self.x, 0, self.size) * 100 / self.size
+            v := 100 - _clamp(py - self.y, 0, self.size) * 100 / self.size
+            self._set_hsv(self.hue, sat, v)
+        } elif self._drag == 2 {
+            h := _clamp(py - self.y, 0, self.size - 1) * 360 / self.size
+            self._set_hsv(h, self.saturation, self.value)
+        }
+    }
+
+    define handle(self, e: window.Event) -> Bool {
+        if not self.enabled { return false }
+        if e.kind == "mouse_down" and e.button == 1 {
+            // The square includes its right / bottom edge (full saturation, black).
+            if e.x <= self.x + self.size and e.y <= self.y + self.size {
+                self._drag = 1
+            } elif e.x >= self._strip_x() and e.y <= self.y + self.size {
+                self._drag = 2
+            } else {
+                self._drag = 0
+            }
+            self._from_point(e.x, e.y)
+            return true
+        }
+        if e.kind == "mouse_move" and self._drag > 0 {
+            self._from_point(e.x, e.y)
+            return true
+        }
+        if e.kind == "mouse_up" {
+            self._drag = 0
+            return true
+        }
+        if e.kind == "key_down" {
+            k := e.key
+            if k == "left" { self._set_hsv(self.hue, self.saturation - 5, self.value) }
+            elif k == "right" { self._set_hsv(self.hue, self.saturation + 5, self.value) }
+            elif k == "up" { self._set_hsv(self.hue, self.saturation, self.value + 5) }
+            elif k == "down" { self._set_hsv(self.hue, self.saturation, self.value - 5) }
+            elif k == "pageup" { self._set_hsv(self.hue + 10, self.saturation, self.value) }
+            elif k == "pagedown" { self._set_hsv(self.hue - 10, self.saturation, self.value) }
+            else { return false }
+            return true
+        }
+        return false
+    }
+
+    define draw(self, win: window.Window, t: Theme) -> void {
+        n := 16
+        cell := _max(1, self.size / n)
+        i := 0
+        while i < n {
+            j := 0
+            while j < n {
+                c := hsv_to_color(self.hue, i * 100 / (n - 1), 100 - j * 100 / (n - 1))
+                win.rect(self.x + i * cell, self.y + j * cell, cell, cell, c)
+                j = j + 1
+            }
+            i = i + 1
+        }
+        win.rect(self.x, self.y, n * cell, n * cell, t.border, fill=false)
+        // Marker on the square.
+        mx := self.x + self.saturation * self.size / 100
+        my := self.y + (100 - self.value) * self.size / 100
+        win.circle(mx, my, 5, window.white(), fill=false)
+        win.circle(mx, my, 6, window.black(), fill=false)
+        // Hue strip.
+        sx := self._strip_x()
+        segs := 32
+        seg_h := _max(1, self.size / segs)
+        k := 0
+        while k < segs {
+            win.rect(sx, self.y + k * seg_h, 16, seg_h, hsv_to_color(k * 360 / segs, 100, 100))
+            k = k + 1
+        }
+        win.rect(sx, self.y, 16, segs * seg_h, t.border, fill=false)
+        hy := self.y + self.hue * self.size / 360
+        win.rect(sx - 2, hy - 1, 20, 3, t.text)
+        // Swatch + hex.
+        by := self.y + self.size + 8
+        win.rect(self.x, by, 3 * t.line(), t.line() + 4, self.color)
+        win.rect(self.x, by, 3 * t.line(), t.line() + 4, t.border, fill=false)
+        win.text(self.hex(), self.x + 3 * t.line() + t.char_w(), by + 2, _ink(self, t.text, t), scale=t.scale)
+        if self.focused { _focus_ring(win, self, t) }
     }
 }
 
@@ -1928,6 +2267,10 @@ each row a List (anything with `.str()`). Columns size to their content
 (or set `widths`); click a row (or Up / Down) to select it, click a
 header to sort by that column (again: reverse). `on_select(index, row)`
 runs when the selection changes — `index` into `rows`, whatever the sort.
+With `editable=true` a cell can be changed in place: Left / Right pick
+the column, Enter / F2 or a double-click edit it, Enter saves, Escape
+cancels. The new value goes into `rows` (an Int column stays an Int when
+the text is a number) and `on_edit(index, column, value)` runs.
 ---
 struct Table : Widget {
     columns: List
@@ -1941,8 +2284,14 @@ struct Table : Widget {
     _order: List
     _top: Int
     _last_w: List
+    editable: Bool
+    column: Int
+    on_edit: Callable
+    _editor: TextInput
+    _edit_row: Int
+    _edit_col: Int
 
-    define __init(self, columns: List, rows: List, on_select: Callable = null, visible_rows: Int = 8, expand: Bool = false) -> void {
+    define __init(self, columns: List, rows: List, on_select: Callable = null, visible_rows: Int = 8, expand: Bool = false, editable: Bool = false, on_edit: Callable = null) -> void {
         super().__init()
         self.columns = columns
         self.rows = rows
@@ -1956,7 +2305,74 @@ struct Table : Widget {
         self._order = []
         self._top = 0
         self._last_w = []
+        self.editable = editable
+        self.column = 0
+        self.on_edit = on_edit
+        self._editor = TextInput("")
+        self._edit_row = -1
+        self._edit_col = -1
         self.focusable = true
+    }
+
+    --- True while a cell is being edited. ---
+    define editing(self) -> Bool {
+        return self._edit_row >= 0
+    }
+
+    --- Edit cell (row index `r`, column `c`) in place. ---
+    define edit_cell(self, r: Int, c: Int) -> void {
+        if r < 0 or r >= self.rows.length() or c < 0 or c >= self.columns.length() { return }
+        self.select(r)
+        self.column = c
+        self._edit_row = r
+        self._edit_col = c
+        self._editor.text = self._cell(r, c)
+        self._editor.select_all()
+        self._editor._undo = []
+        self._editor.focused = true
+    }
+
+    --- Stop editing; `save` keeps the typed value. ---
+    define finish_edit(self, save: Bool = true) -> void {
+        if not self.editing() { return }
+        r := self._edit_row
+        c := self._edit_col
+        self._edit_row = -1
+        self._edit_col = -1
+        self._editor.focused = false
+        if not save { return }
+        row: List = self.rows[r]
+        while row.length() <= c { row.append("") }
+        text := self._editor.text
+        old := row[c]
+        value: Any = text
+        if type(old) == "Int" and self._numeric(text) { value = text.to_int() }
+        row[c] = value
+        self._order = []                          // re-sort with the new value
+        if self.on_edit != null { self.on_edit(r, c, value) }
+    }
+
+    // The cell rectangle of (row index r, column c) as [x, y, w, h], or [].
+    define _cell_rect(self, r: Int, c: Int) -> List {
+        order := self._ordered()
+        pos := -1
+        i := 0
+        while i < order.length() {
+            v: Int = order[i]
+            if v == r { pos = i }
+            i = i + 1
+        }
+        if pos < self._top or pos >= self._top + self._shown() or c >= self._last_w.length() { return [] }
+        x := self.x + 2
+        k := 0
+        while k < c {
+            w: Int = self._last_w[k]
+            x = x + w
+            k = k + 1
+        }
+        cw: Int = self._last_w[c]
+        rh := self._row_h()
+        return [x, self.y + 2 + rh + (pos - self._top) * rh, cw, rh]
     }
 
     define _row_h(self) -> Int {
@@ -2109,9 +2525,42 @@ struct Table : Widget {
 
     define handle(self, e: window.Event) -> Bool {
         if not self.enabled { return false }
+        if self.editing() {
+            rect := self._cell_rect(self._edit_row, self._edit_col)
+            inside := false
+            if rect.length() == 4 and (e.kind == "mouse_down" or e.kind == "mouse_move" or e.kind == "mouse_up") {
+                rx: Int = rect[0]
+                ry: Int = rect[1]
+                rw: Int = rect[2]
+                rhh: Int = rect[3]
+                inside = e.x >= rx and e.y >= ry and e.x < rx + rw and e.y < ry + rhh
+            }
+            if e.kind == "key_down" and (e.key == "return" or e.key == "keypad_enter") {
+                self.finish_edit(true)
+                return true
+            }
+            if e.kind == "key_down" and e.key == "escape" {
+                self.finish_edit(false)
+                return true
+            }
+            if e.kind == "key_down" or e.kind == "text" or inside or (e.kind != "mouse_down" and self._editor._dragging) {
+                self._editor.handle(e)
+                return true
+            }
+            if e.kind == "mouse_down" { self.finish_edit(true) }      // a click elsewhere saves
+        }
         order := self._ordered()
         if e.kind == "mouse_down" and e.button == 1 {
             p := self._pos_at(e.y)
+            if p >= 0 and self.editable {
+                c := self._col_at(e.x)
+                if c >= 0 { self.column = c }
+                if e.clicks >= 2 and c >= 0 {
+                    r: Int = order[p]
+                    self.edit_cell(r, c)
+                    return true
+                }
+            }
             if p == -1 {
                 c := self._col_at(e.x)
                 if c >= 0 { self.sort_by(c, c == self.sort_column and not self.sort_descending) }
@@ -2135,6 +2584,18 @@ struct Table : Widget {
             i = i + 1
         }
         k := e.key
+        if self.editable and (k == "return" or k == "keypad_enter" or k == "f2") and self.selected >= 0 {
+            self.edit_cell(self.selected, self.column)
+            return true
+        }
+        if self.editable and k == "left" {
+            self.column = _max(0, self.column - 1)
+            return true
+        }
+        if self.editable and k == "right" {
+            self.column = _min(self.columns.length() - 1, self.column + 1)
+            return true
+        }
         if k == "down" {
             self.select(order[_min(order.length() - 1, cur + 1)])
         } elif k == "up" {
@@ -2203,6 +2664,32 @@ struct Table : Widget {
                 c = c + 1
             }
             p = p + 1
+        }
+        if self.editable and self.selected >= 0 and self.focused {
+            sel := self._cell_rect(self.selected, self.column)
+            if sel.length() == 4 {
+                sx: Int = sel[0]
+                sy: Int = sel[1]
+                sw: Int = sel[2]
+                shh: Int = sel[3]
+                win.rect(sx, sy, sw, shh, t.accent_text, fill=false)
+            }
+        }
+        if self.editing() {
+            if not self.focused {
+                self.finish_edit(true)                // focus moved away: keep the value
+            } else {
+                rect := self._cell_rect(self._edit_row, self._edit_col)
+                if rect.length() == 4 {
+                    ex: Int = rect[0]
+                    ey: Int = rect[1]
+                    ew: Int = rect[2]
+                    ehh: Int = rect[3]
+                    self._editor.measure(t)
+                    self._editor.place(ex, ey, ew, ehh)
+                    self._editor.draw(win, t)
+                }
+            }
         }
         _clip_pop(win)
         if order.length() > shown {
@@ -3079,6 +3566,322 @@ struct MenuBar : Widget {
     }
 }
 
+// ===== FileDialog =====
+
+---
+A window-sized dialog to pick a file (`mode="open"`), a name to save as
+(`mode="save"`) or a folder (`mode="folder"`), starting in `dir`.
+`filter` (e.g. "*.qk") limits the files shown. `show()` opens it;
+`on_pick(path)` runs with the full path chosen, `on_cancel()` (optional)
+when it's dismissed. Double-click or Enter opens a folder or picks a
+file; Backspace goes up a folder; Tab moves between the list and the
+name field; Escape cancels. While it's open it takes all input.
+---
+struct FileDialog : Widget {
+    mode: String
+    dir: String
+    filter: String
+    title: String
+    show_hidden: Bool
+    on_pick: Callable
+    on_cancel: Callable
+    is_open: Bool
+    _names: List
+    _dirs: List
+    _list: ListView
+    _name: TextInput
+    _ok: Button
+    _cancel: Button
+    _in_name: Bool
+    _px: Int
+    _py: Int
+    _pw: Int
+    _ph: Int
+
+    define __init(self, mode: String = "open", dir: String = ".", on_pick: Callable = null, filter: String = "", title: String = "", on_cancel: Callable = null) -> void {
+        super().__init()
+        self.mode = mode
+        self.dir = fs.absolute(dir)
+        self.filter = filter
+        self.title = title
+        if title == "" {
+            if mode == "save" { self.title = "Save as" }
+            elif mode == "folder" { self.title = "Choose a folder" }
+            else { self.title = "Open" }
+        }
+        self.show_hidden = false
+        self.on_pick = on_pick
+        self.on_cancel = on_cancel
+        self.is_open = false
+        self._names = []
+        self._dirs = []
+        self._list = ListView([], rows=8)
+        self._name = TextInput("", columns=30)
+        label := "Open"
+        if mode == "save" { label = "Save" }
+        if mode == "folder" { label = "Choose" }
+        self._ok = Button(label)
+        self._cancel = Button("Cancel")
+        self._in_name = mode == "save"
+        self._px = 0
+        self._py = 0
+        self._pw = 0
+        self._ph = 0
+    }
+
+    --- Open the dialog (reading `dir`). ---
+    define show(self) -> void {
+        _close_popups()
+        self.go(self.dir)
+        self.is_open = true
+        _popups.append(self)
+    }
+
+    --- Show folder `path`. ---
+    define go(self, path: String) -> void {
+        if not fs.is_dir(path) { return }
+        self.dir = fs.absolute(path)
+        dirs := []
+        files := []
+        for e in fs.list_dir(self.dir) {
+            name: String = e
+            if not self.show_hidden and name.startswith(".") { continue }
+            if fs.is_dir(fs.join(self.dir, name)) {
+                dirs.append(name)
+            } elif self.mode != "folder" and (self.filter == "" or fs.matches(self.filter, name)) {
+                files.append(name)
+            }
+        }
+        dirs = _sorted_names(dirs)
+        files = _sorted_names(files)
+        names := []
+        kinds := []
+        if fs.dirname(self.dir) != self.dir {
+            names.append("..")
+            kinds.append(true)
+        }
+        for d in dirs {
+            names.append(d)
+            kinds.append(true)
+        }
+        for f in files {
+            names.append(f)
+            kinds.append(false)
+        }
+        self._names = names
+        self._dirs = kinds
+        shown := []
+        i := 0
+        while i < names.length() {
+            n: String = names[i]
+            isd: Bool = kinds[i]
+            if isd and n != ".." { shown.append(n + "/") } else { shown.append(n) }
+            i = i + 1
+        }
+        self._list.items = shown
+        self._list.selected = -1
+        self._list._top = 0
+        if shown.length() > 0 { self._list.select(0) }
+    }
+
+    --- Dismiss the dialog without a choice. ---
+    define cancel(self) -> void {
+        self.close_popup()
+        if self.on_cancel != null { self.on_cancel() }
+    }
+
+    define close_popup(self) -> void {
+        if not self.is_open { return }
+        self.is_open = false
+        keep := []
+        for o in _popups {
+            w: Widget = o
+            if w != self { keep.append(w) }
+        }
+        _popups.clear()
+        for w in keep { _popups.append(w) }
+    }
+
+    define _pick(self, path: String) -> void {
+        self.close_popup()
+        if self.on_pick != null { self.on_pick(path) }
+    }
+
+    // Enter / double-click on list row i.
+    define _open_row(self, i: Int) -> void {
+        if i < 0 or i >= self._names.length() { return }
+        name: String = self._names[i]
+        isd: Bool = self._dirs[i]
+        if name == ".." {
+            self.go(fs.dirname(self.dir))
+        } elif isd {
+            self.go(fs.join(self.dir, name))
+        } elif self.mode == "save" {
+            self._name.text = name
+            self._name.select_all()
+            self._confirm()
+        } else {
+            self._pick(fs.join(self.dir, name))
+        }
+    }
+
+    // The Open / Save / Choose button.
+    define _confirm(self) -> void {
+        if self.mode == "save" {
+            name := self._name.text.trim()
+            if name.length() > 0 { self._pick(fs.join(self.dir, name)) }
+        } elif self.mode == "folder" {
+            i := self._list.selected
+            if i >= 0 and i < self._names.length() {
+                n: String = self._names[i]
+                if n != ".." {
+                    self._pick(fs.join(self.dir, n))
+                    return
+                }
+            }
+            self._pick(self.dir)
+        } else {
+            self._open_row(self._list.selected)
+        }
+    }
+
+    define popup_contains(self, px: Int, py: Int) -> Bool {
+        return true                               // modal: every click is ours
+    }
+
+    define popup_handle(self, e: window.Event) -> Bool {
+        if self._list.contains(e.x, e.y) or (e.kind == "wheel") {
+            if e.kind == "mouse_down" {
+                self._in_name = false
+                self._list.focused = true
+                self._name.focused = false
+            }
+            self._list.handle(e)
+            if e.kind == "mouse_down" and e.button == 1 and e.clicks >= 2 { self._open_row(self._list.selected) }
+            elif e.kind == "mouse_down" and self.mode == "save" {
+                i := self._list.selected
+                if i >= 0 {
+                    isd: Bool = self._dirs[i]
+                    if not isd { self._name.text = self._names[i] }
+                }
+            }
+            return true
+        }
+        if self.mode == "save" and (self._name.contains(e.x, e.y) or self._name._dragging) {
+            if e.kind == "mouse_down" {
+                self._in_name = true
+                self._name.focused = true
+                self._list.focused = false
+            }
+            self._name.handle(e)
+            return true
+        }
+        for b in [self._ok, self._cancel] {
+            btn: Button = b
+            if e.kind == "mouse_down" and e.button == 1 { btn.pressed = btn.contains(e.x, e.y) }
+            if e.kind == "mouse_up" and e.button == 1 {
+                was := btn.pressed
+                btn.pressed = false
+                if was and btn.contains(e.x, e.y) {
+                    if btn == self._ok { self._confirm() } else { self.cancel() }
+                    return true
+                }
+            }
+        }
+        return true
+    }
+
+    define popup_key(self, e: window.Event) -> Bool {
+        if e.kind == "key_down" {
+            k := e.key
+            if k == "escape" {
+                self.cancel()
+                return true
+            }
+            if k == "tab" and self.mode == "save" {
+                self._in_name = not self._in_name
+                return true
+            }
+            if k == "return" or k == "keypad_enter" {
+                if self._in_name { self._confirm() } else { self._open_row(self._list.selected) }
+                return true
+            }
+            if k == "backspace" and not self._in_name {
+                self.go(fs.dirname(self.dir))
+                return true
+            }
+        }
+        if self._in_name { self._name.handle(e) } else { self._list.handle(e) }
+        return true
+    }
+
+    define draw_popup(self, win: window.Window, t: Theme) -> void {
+        // Dim what's behind, then a centred panel.
+        win.rect(0, 0, win.width(), win.height(), window.rgba(0, 0, 0, 110))
+        self._pw = _min(win.width() - 24, 520)
+        self._ph = _min(win.height() - 24, 380)
+        self._px = (win.width() - self._pw) / 2
+        self._py = (win.height() - self._ph) / 2
+        x := self._px
+        y := self._py
+        w := self._pw
+        h := self._ph
+        win.rect(x + 4, y + 4, w, h, mix(t.background, window.black(), 50))
+        win.rect(x, y, w, h, t.surface)
+        win.rect(x, y, w, h, t.border, fill=false)
+        lh := t.line()
+        win.text(self.title, x + 12, y + 10, t.text, scale=t.scale)
+        shown_dir := self.dir
+        fit := _max(4, (w - 24) / t.char_w())
+        if shown_dir.length() > fit { shown_dir = "..." + shown_dir.substring(shown_dir.length() - fit + 3, shown_dir.length()) }
+        win.text(shown_dir, x + 12, y + 10 + lh + 4, t.muted, scale=t.scale)
+        top := y + 10 + 2 * lh + 14
+        bottom := y + h - 12 - (lh + 12)          // the buttons row
+        if self.mode == "save" { bottom = bottom - (lh + 12) - 8 }
+        self._list.focused = not self._in_name
+        self._name.focused = self._in_name
+        self._list.measure(t)
+        self._list.place(x + 12, top, w - 24, _max(30, bottom - top - 8))
+        self._list.draw(win, t)
+        if self.mode == "save" {
+            self._name.measure(t)
+            self._name.place(x + 12, bottom, w - 24, lh + 12)
+            self._name.draw(win, t)
+        }
+        by := y + h - 12 - (lh + 12)
+        for b in [self._cancel, self._ok] {
+            btn: Button = b
+            btn.measure(t)
+        }
+        okw := self._ok.min_w
+        cw := self._cancel.min_w
+        self._ok.place(x + w - 12 - okw, by, okw, lh + 12)
+        self._cancel.place(x + w - 12 - okw - 8 - cw, by, cw, lh + 12)
+        self._cancel.draw(win, t)
+        self._ok.draw(win, t)
+    }
+}
+
+// Names sorted, ignoring case (insertion sort; folders are small).
+define _sorted_names(names: List) -> List {
+    out := []
+    for n in names { out.append(n) }
+    i := 1
+    while i < out.length() {
+        cur: String = out[i]
+        j := i - 1
+        while j >= 0 {
+            prev: String = out[j]
+            if prev.lower() <= cur.lower() { break }
+            out[j + 1] = prev
+            j = j - 1
+        }
+        out[j + 1] = cur
+        i = i + 1
+    }
+    return out
+}
+
 // ===== App =====
 
 // Visible, enabled, focusable widgets in tree order (Tab order).
@@ -3169,6 +3972,11 @@ struct App {
     _tip_since: Int
     _mx: Int
     _my: Int
+    _drag_src: Widget
+    _drag_from_x: Int
+    _drag_from_y: Int
+    _drag_data: Any
+    _dragging: Bool
 
     define __init(self, title: String, width: Int, height: Int, theme: Theme = null, resizable: Bool = true, headless: Bool = false) -> void {
         self.win = window.open(title, width, height, resizable=resizable, headless=headless)
@@ -3187,7 +3995,30 @@ struct App {
         self._tip_since = 0
         self._mx = -1
         self._my = -1
+        self._drag_src = null
+        self._drag_from_x = 0
+        self._drag_from_y = 0
+        self._drag_data = null
+        self._dragging = false
         _close_popups()
+    }
+
+    --- True while something is being dragged (see `Widget.on_drag`). ---
+    define dragging(self) -> Bool {
+        return self._dragging
+    }
+
+    // The innermost widget at (px, py) that something can be dropped on.
+    define _drop_target(self, px: Int, py: Int) -> Widget {
+        path := []
+        _path(self.root, px, py, path)
+        i := path.length() - 1
+        while i >= 0 {
+            w: Widget = path[i]
+            if w.on_drop != null and w.enabled { return w }
+            i = i - 1
+        }
+        return null
     }
 
     --- True until the window is closed. ---
@@ -3274,6 +4105,42 @@ struct App {
                 }
             }
         }
+        // Drag and drop: past 4 px of movement with the button held, the
+        // pressed widget's `on_drag` data travels to an `on_drop` target.
+        if k == "mouse_move" and self._drag_src != null and e.left and not self._dragging {
+            dx := e.x - self._drag_from_x
+            dy := e.y - self._drag_from_y
+            if dx * dx + dy * dy > 16 {
+                self._drag_data = self._drag_src.on_drag()
+                if self._drag_data != null {
+                    self._dragging = true
+                    if self._capture != null { self._capture.pressed = false }
+                } else {
+                    self._drag_src = null
+                }
+            }
+        }
+        if k == "mouse_up" and self._dragging {
+            target := self._drop_target(e.x, e.y)
+            data := self._drag_data
+            self._dragging = false
+            self._drag_src = null
+            self._drag_data = null
+            if self._capture != null {
+                cap := self._capture
+                self._capture = null
+                cap.pressed = false
+                // Released somewhere else: no click.
+                ev := window.Event("mouse_up")
+                ev.x = -100000
+                ev.y = -100000
+                ev.button = e.button
+                cap.handle(ev)
+            }
+            if target != null { target.on_drop(data) }
+            return
+        }
+        if k == "mouse_up" { self._drag_src = null }
         if k == "mouse_move" {
             _clear_hover(self.root)
             over := _hit(self.root, e.x, e.y)
@@ -3296,6 +4163,22 @@ struct App {
                 i = i - 1
             }
             return
+        }
+        if k == "mouse_down" and e.button == 1 {
+            path := []
+            _path(self.root, e.x, e.y, path)
+            self._drag_src = null
+            i := path.length() - 1
+            while i >= 0 {
+                w: Widget = path[i]
+                if w.on_drag != null and w.enabled {
+                    self._drag_src = w
+                    self._drag_from_x = e.x
+                    self._drag_from_y = e.y
+                    break
+                }
+                i = i - 1
+            }
         }
         if k == "mouse_down" {
             target := _hit(self.root, e.x, e.y)
@@ -3376,6 +4259,17 @@ struct App {
         self.win.unclip()
         self.win.clear(t.background)
         self.root.draw(self.win, t)
+        if self._dragging {
+            over := self._drop_target(self._mx, self._my)
+            if over != null { self.win.rect(over.x - 2, over.y - 2, over.width + 4, over.height + 4, t.accent, fill=false) }
+            label := "?"
+            if self._drag_data != null { label = self._drag_data.str() }
+            if label.length() > 30 { label = label.substring(0, 30) + "..." }
+            lw := window.text_width(label, t.scale) + 12
+            self.win.rect(self._mx + 12, self._my + 8, lw, t.line() + 6, mix(t.surface, t.accent, 25))
+            self.win.rect(self._mx + 12, self._my + 8, lw, t.line() + 6, t.accent, fill=false)
+            self.win.text(label, self._mx + 18, self._my + 11, t.text, scale=t.scale)
+        }
         for o in _popups {
             p: Widget = o
             p.draw_popup(self.win, t)
