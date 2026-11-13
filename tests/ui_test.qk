@@ -1,4 +1,4 @@
-// ui v1.5.0, headless: layout, events routed by App.dispatch, widget
+// ui v1.6.0, headless: layout, events routed by App.dispatch, widget
 // state and drawing. Every test is skipped (passes) without SDL2.
 use window
 use ui
@@ -1273,5 +1273,136 @@ define test_date_picker() -> void {
     dp.set_date(2026, 2, 31)
     test.assert_eq(dp.text(), "2026-02-28")
     test.assert_eq(got, [1, 14, 28])
+    app.close()
+}
+
+// ───── v1.6.0: TrueType fonts ─────
+define system_font() -> String {
+    for p in ["/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+              "/usr/share/fonts/TTF/DejaVuSans.ttf",
+              "/usr/share/fonts/dejavu/DejaVuSans.ttf",
+              "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+              "/System/Library/Fonts/Supplemental/Arial.ttf",
+              "/Library/Fonts/Arial.ttf",
+              "C:\\Windows\\Fonts\\arial.ttf"] {
+        path: String = p
+        if fs.exists(path) { return path }
+    }
+    return ""
+}
+
+define test_theme_font() -> void {
+    path := system_font()
+    if path == "" or not window.available() { return }
+    app := new_app()
+    font := window.load_font(path, 16)
+    app.theme.font = font
+    label := ui.Label("WWW")
+    field := ui.TextInput("iiiWWW", columns=20)
+    app.root = ui.Column([label, field], padding=10)
+    app.layout()
+    test.assert_eq(label.min_w, font.width("WWW"))
+    test.assert_eq(label.min_h, font.line_height)
+    test.assert_eq(app.theme.line(), font.line_height)
+    // A click right after "iii" puts the cursor there (narrow letters).
+    x3 := field.x + 8 + font.width("iii")
+    mouse(app, "mouse_down", x3, field.y + field.height / 2)
+    mouse(app, "mouse_up", x3, field.y + field.height / 2)
+    test.assert_eq(field.cursor, 3)
+    typed(app, "x")
+    test.assert_eq(field.text, "iiixWWW")
+    app.draw()
+    // Proportional wrapping in a TextArea: "iiii" fits where "WWWW" doesn't.
+    area := ui.TextArea("iiii iiii WWWW WWWW", rows=4, columns=6, wrap=true)
+    app.root = ui.Row([area, ui.Spacer()], padding=8)
+    app.layout()
+    rows := area.layout()
+    test.assert_true(rows.length() >= 2)
+    first: List = rows[0]
+    test.assert_eq(first[0], 0)
+    app.draw()
+    app.close()
+}
+
+define test_list_item_icons() -> void {
+    if not window.available() { return }
+    app := new_app()
+    picked := ""
+    a := ui.ListItem("alpha", icon="no/such.png", data=1)
+    lv := ui.ListView([a, ui.ListItem("beta"), "plain"], on_select=fn(i, it) { picked = it.str() })
+    table := ui.Table(["Name", "n"], [[ui.ListItem("x.qk", icon="no/such.png"), 3]])
+    app.root = ui.Column([lv, table], padding=8)
+    app.layout()
+    app.draw()                                    // a missing icon draws nothing, no error
+    test.assert_true(a._failed)
+    click(app, lv.x + 20, lv.y + 2 + 24 + 10)
+    test.assert_eq(picked, "beta")
+    test.assert_eq(a.str(), "alpha")
+    test.assert_eq(a.data, 1)
+    app.close()
+}
+
+define test_canvas() -> void {
+    if not window.available() { return }
+    app := new_app()
+    app.theme = ui.light()
+    clicks := []
+    canvas := ui.Canvas(on_draw=fn(win, x, y, w, h) {
+        win.rect(x, y, w, h, window.red())
+        win.rect(x - 50, y, 30, 30, window.blue())        // clipped away
+    }, on_event=fn(e) {
+        if e.kind == "mouse_down" { clicks.append([e.x, e.y]) }
+    }, width=100, height=60)
+    app.root = ui.Column([canvas, ui.Spacer()], padding=20)
+    app.layout()
+    test.assert_eq(canvas.width, 360)
+    test.assert_eq(canvas.height, 60)
+    app.draw()
+    test.assert_eq(app.win.pixel(canvas.x + 5, canvas.y + 5), 0xe63946)
+    test.assert_true(app.win.pixel(canvas.x - 25, canvas.y + 5) != 0x3478f6)
+    click(app, canvas.x + 10, canvas.y + 10)
+    test.assert_eq(clicks, [[canvas.x + 10, canvas.y + 10]])
+    app.close()
+}
+
+define test_animation() -> void {
+    if not window.available() { return }
+    test.assert_eq(ui.lerp(0, 100, 0.5), 50)
+    test.assert_eq(ui.lerp(100, 0, 0.25), 75)
+    test.assert_eq(ui.lerp(-10, 10, 1.0), 10)
+    test.assert_eq(ui.ease("linear", 0.3), 0.3)
+    test.assert_eq(ui.ease("in", 1.0), 1.0)
+    test.assert_eq(ui.ease("out", 0.0), 0.0)
+    test.assert_true(ui.ease("in", 0.5) < 0.5 and ui.ease("out", 0.5) > 0.5)
+    test.assert_true(ui.ease("back", 0.9) > 1.0)                // overshoots
+    app := new_app()
+    app.root = ui.Column([ui.Label("x")])
+    seen := []
+    finished := false
+    app.animate(60, fn(t) { seen.append(t) }, ease="linear", on_done=fn() { finished = true })
+    test.assert_true(app.animating())
+    app.step()
+    window.sleep(30)
+    app.step()
+    window.sleep(50)
+    app.step()
+    test.assert_true(finished)
+    test.assert_false(app.animating())
+    last: Double = seen[seen.length() - 1]
+    test.assert_eq(last, 1.0)
+    test.assert_true(seen.length() >= 2)
+    // A cancelled animation stops calling back.
+    count := 0
+    anim := app.animate(1000, fn(t) { count = count + 1 })
+    app.step()
+    anim.cancel()
+    app.step()
+    app.step()
+    test.assert_eq(count, 1)
+    // Duration 0: one step at 1.0.
+    got := []
+    app.animate(0, fn(t) { got.append(t) })
+    app.step()
+    test.assert_eq(got, [1.0])
     app.close()
 }

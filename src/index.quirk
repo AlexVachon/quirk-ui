@@ -52,7 +52,11 @@ move by word; double-click selects a word.
 
 Tooltips: `w.tooltip = "..."`, or inline `ui.tooltip(widget, "...")`.
 
-Themes: `ui.dark()` (default) and `ui.light()`, or your own `ui.Theme`.
+Themes: `ui.dark()` (default) and `ui.light()`, or your own `ui.Theme`;
+`theme.font = window.load_font("DejaVuSans.ttf", 15)` for TrueType text.
+Custom drawing: `ui.Canvas(on_draw=fn(win, x, y, w, h) => ...)`.
+Animation: `app.animate(ms, fn(t) => ..., ease="out")`, `ui.lerp`, `ui.ease`.
+Icons in lists / tables: `ui.ListItem("name", icon="file.png")`.
 
 @example
 use ui
@@ -113,6 +117,8 @@ copy of `ui.dark()` / `ui.light()`.
   `accent` / `accent_text` — buttons, checks, sliders, selection
   `input` — text field / list background; `border`; `focus` — focus ring
   `scale` — text size multiplier (1 = 8x16 pixel characters)
+  `font`  — a `window.Font` for all text (null: the built-in 8x16 font);
+            `theme.font = window.load_font("DejaVuSans.ttf", 15)`
 ---
 struct Theme {
     background: Int
@@ -125,6 +131,7 @@ struct Theme {
     border: Int
     focus: Int
     scale: Int
+    font: window.Font
 
     define __init(self, background: Int, surface: Int, text: Int, muted: Int, accent: Int, accent_text: Int, input: Int, border: Int, focus: Int, scale: Int = 1) -> void {
         self.background = background
@@ -137,16 +144,39 @@ struct Theme {
         self.border = border
         self.focus = focus
         self.scale = scale
+        self.font = null
     }
 
     --- Height of one line of text. ---
     define line(self) -> Int {
+        if self.font != null { return self.font.line_height }
         return 16 * self.scale
     }
 
-    --- Width of one character. ---
+    --- Width of one (average) character — for sizes given in characters. ---
     define char_w(self) -> Int {
+        if self.font != null { return _max(1, self.font.width("n")) }
         return 8 * self.scale
+    }
+
+    --- Width in pixels of `s` (its longest line) in the theme's font. ---
+    define text_w(self, s: String) -> Int {
+        if self.font != null { return self.font.width(s) }
+        return window.text_width(s, self.scale)
+    }
+
+    --- Draw `s` at (x, y) in the theme's font. ---
+    define draw_text(self, win: window.Window, s: String, x: Int, y: Int, color: Int) -> void {
+        win.text(s, x, y, color, scale=self.scale, font=self.font)
+    }
+
+    --- `s` cut to fit `px` pixels. ---
+    define fit(self, s: String, px: Int) -> String {
+        if self.text_w(s) <= px { return s }
+        if self.font == null { return s.substring(0, _max(0, px / self.char_w())) }
+        n := s.length()
+        while n > 0 and self.text_w(s.substring(0, n)) > px { n = n - 1 }
+        return s.substring(0, n)
     }
 }
 
@@ -550,7 +580,7 @@ struct Label : Widget {
     }
 
     define measure(self, t: Theme) -> void {
-        self.min_w = window.text_width(self.text, t.scale)
+        self.min_w = t.text_w(self.text)
         lines := self.text.split("\n").length()
         self.min_h = _max(1, lines) * t.line()
     }
@@ -558,12 +588,12 @@ struct Label : Widget {
     define draw(self, win: window.Window, t: Theme) -> void {
         c := self.color
         if c == -1 { c = t.text }
-        tw := window.text_width(self.text, t.scale)
+        tw := t.text_w(self.text)
         tx := self.x
         if self.align == "center" { tx = self.x + (self.width - tw) / 2 }
         if self.align == "right" { tx = self.x + self.width - tw }
         ty := self.y + (self.height - self.min_h) / 2
-        win.text(self.text, tx, ty, _ink(self, c, t), scale=t.scale)
+        win.text(self.text, tx, ty, _ink(self, c, t), scale=t.scale, font=t.font)
     }
 }
 
@@ -591,7 +621,7 @@ struct Button : Widget {
     }
 
     define measure(self, t: Theme) -> void {
-        self.min_w = window.text_width(self.text, t.scale) + 4 * t.char_w()
+        self.min_w = t.text_w(self.text) + 4 * t.char_w()
         self.min_h = t.line() + 12
     }
 
@@ -605,9 +635,9 @@ struct Button : Widget {
             bg = mix(t.accent, window.white(), 15)
         }
         win.rect(self.x, self.y, self.width, self.height, bg)
-        tw := window.text_width(self.text, t.scale)
+        tw := t.text_w(self.text)
         win.text(self.text, self.x + (self.width - tw) / 2, self.y + (self.height - t.line()) / 2,
-                 _ink(self, t.accent_text, t), scale=t.scale)
+                 _ink(self, t.accent_text, t), scale=t.scale, font=t.font)
         if self.focused { _focus_ring(win, self, t) }
     }
 
@@ -658,7 +688,7 @@ struct Checkbox : Widget {
     }
 
     define measure(self, t: Theme) -> void {
-        self.min_w = t.line() + t.char_w() + window.text_width(self.text, t.scale)
+        self.min_w = t.line() + t.char_w() + t.text_w(self.text)
         self.min_h = t.line() + 4
     }
 
@@ -674,7 +704,7 @@ struct Checkbox : Widget {
             m := _max(2, s / 4)
             win.rect(bx + m, by + m, s - 2 * m, s - 2 * m, _ink(self, t.accent, t))
         }
-        win.text(self.text, bx + s + t.char_w(), self.y + (self.height - t.line()) / 2, _ink(self, t.text, t), scale=t.scale)
+        win.text(self.text, bx + s + t.char_w(), self.y + (self.height - t.line()) / 2, _ink(self, t.text, t), scale=t.scale, font=t.font)
         if self.focused { _focus_ring(win, self, t) }
     }
 
@@ -728,6 +758,7 @@ struct TextEdit : Widget {
     _undo: List
     _redo: List
     _typing: Bool
+    _t: Theme
 
     define __init(self, text: String = "", on_change: Callable = null) -> void {
         super().__init()
@@ -740,6 +771,7 @@ struct TextEdit : Widget {
         self._undo = []
         self._redo = []
         self._typing = false
+        self._t = null
         self._cw = 8
         self._lh = 16
         self.focusable = true
@@ -941,6 +973,33 @@ struct TextEdit : Widget {
         return j
     }
 
+    // Pixel width of text[a:b] in the theme's font (fixed-width without one).
+    define _span_w(self, a: Int, b: Int) -> Int {
+        if b <= a { return 0 }
+        if self._t == null or self._t.font == null { return (b - a) * self._cw }
+        return self._t.text_w(self.text.substring(a, b))
+    }
+
+    // The index in [a, b] whose x offset from `a` is nearest to `rel` px.
+    define _index_near(self, a: Int, b: Int, rel: Int) -> Int {
+        if rel <= 0 { return a }
+        if self._t == null or self._t.font == null {
+            return _clamp(a + (rel + self._cw / 2) / self._cw, a, b)
+        }
+        prev := 0
+        i := a + 1
+        while i <= b {
+            w := self._span_w(a, i)
+            if w >= rel {
+                if rel - prev < w - rel { return i - 1 }
+                return i
+            }
+            prev = w
+            i = i + 1
+        }
+        return b
+    }
+
     --- The text index under the point (px, py) (where a click puts the cursor). ---
     define index_at(self, px: Int, py: Int) -> Int {
         return 0
@@ -1057,20 +1116,15 @@ struct TextInput : TextEdit {
     }
 
     define measure(self, t: Theme) -> void {
+        self._t = t
         self._cw = t.char_w()
         self._lh = t.line()
         self.min_w = self.columns * t.char_w() + 16
         self.min_h = t.line() + 12
     }
 
-    define _visible_chars(self) -> Int {
-        return _max(1, (self.width - 16) / self._cw)
-    }
-
     define index_at(self, px: Int, py: Int) -> Int {
-        col := (px - self.x - 8 + self._cw / 2) / self._cw
-        if px < self.x + 8 { col = 0 }
-        return _clamp(self._scroll + col, 0, self.text.length())
+        return self._index_near(self._scroll, self.text.length(), px - self.x - 8)
     }
 
     define handle(self, e: window.Event) -> Bool {
@@ -1101,32 +1155,34 @@ struct TextInput : TextEdit {
             border = mix(t.border, t.text, 30)
         }
         win.rect(self.x, self.y, self.width, self.height, border, fill=false)
-        cw := t.char_w()
-        visible := _max(1, (self.width - 16) / cw)
+        self._t = t
+        avail := _max(1, self.width - 16)
+        n := self.text.length()
         // Keep the cursor in view.
         if self.cursor < self._scroll { self._scroll = self.cursor }
-        if self.cursor > self._scroll + visible { self._scroll = self.cursor - visible }
-        self._scroll = _clamp(self._scroll, 0, _max(0, self.text.length() - 1))
+        while self._scroll < self.cursor and self._span_w(self._scroll, self.cursor) > avail { self._scroll = self._scroll + 1 }
+        self._scroll = _clamp(self._scroll, 0, _max(0, n - 1))
+        // The last character that fits.
+        end := self._index_near(self._scroll, n, avail)
+        while end > self._scroll and self._span_w(self._scroll, end) > avail { end = end - 1 }
         ty := self.y + (self.height - t.line()) / 2
-        if self.text.length() == 0 {
+        if n == 0 {
             if not self.focused and self.placeholder.length() > 0 {
-                shown := self.placeholder
-                if shown.length() > visible { shown = shown.substring(0, visible) }
-                win.text(shown, self.x + 8, ty, t.muted, scale=t.scale)
+                win.text(t.fit(self.placeholder, avail), self.x + 8, ty, t.muted, scale=t.scale, font=t.font)
             }
         } else {
-            end := _min(self.text.length(), self._scroll + visible)
             if self.has_selection() {
                 a := _max(self.selection_start(), self._scroll)
                 b := _min(self.selection_end(), end)
                 if b > a {
-                    win.rect(self.x + 8 + (a - self._scroll) * cw, ty, (b - a) * cw, t.line(), _sel_color(self, t))
+                    sx := self.x + 8 + self._span_w(self._scroll, a)
+                    win.rect(sx, ty, self._span_w(a, b), t.line(), _sel_color(self, t))
                 }
             }
-            win.text(self.text.substring(self._scroll, end), self.x + 8, ty, _ink(self, t.text, t), scale=t.scale)
+            win.text(self.text.substring(self._scroll, end), self.x + 8, ty, _ink(self, t.text, t), scale=t.scale, font=t.font)
         }
         if self.focused and (window.ticks() / 530) % 2 == 0 {
-            cx := self.x + 8 + (self.cursor - self._scroll) * cw
+            cx := self.x + 8 + self._span_w(self._scroll, self.cursor)
             win.rect(cx, ty, _max(1, t.scale), t.line(), t.text)
         }
     }
@@ -1169,6 +1225,7 @@ struct TextArea : TextEdit {
     }
 
     define measure(self, t: Theme) -> void {
+        self._t = t
         self._cw = t.char_w()
         self._lh = t.line()
         self.min_w = self.columns * t.char_w() + 16
@@ -1189,13 +1246,18 @@ struct TextArea : TextEdit {
         out := []
         n := self.text.length()
         cols := self._shown_cols()
+        avail := _max(1, self.width - 16)
+        if self.width <= 0 { avail = cols * self._cw }
         s := 0
         while true {
             e := self._line_end(s)
             if self.wrap {
                 pos := s
-                while e - pos > cols {
-                    brk := pos + cols
+                while self._span_w(pos, e) > avail {
+                    // The most that fits (at least one character).
+                    brk := self._index_near(pos, e, avail)
+                    while brk > pos + 1 and self._span_w(pos, brk) > avail { brk = brk - 1 }
+                    if brk <= pos { brk = pos + 1 }
                     j := brk
                     while j > pos and self.text.substring(j - 1, j) != " " { j = j - 1 }
                     if j > pos { brk = j }
@@ -1254,9 +1316,12 @@ struct TextArea : TextEdit {
         if py < self.y + 6 { r = self._top }
         left := self._left
         if self.wrap { left = 0 }
-        col := left + (px - self.x - 8 + self._cw / 2) / self._cw
-        if px < self.x + 8 { col = left }
-        return self._at_row(rows, r, col)
+        if r < 0 or r >= rows.length() { return self._at_row(rows, r, 0) }
+        row: List = rows[r]
+        ra: Int = row[0]
+        rb: Int = row[1]
+        idx := self._index_near(_min(ra + left, rb), rb, px - self.x - 8)
+        return self._at_row(rows, r, idx - ra)
     }
 
     define _vertical(self, by: Int, grow: Bool) -> void {
@@ -1264,14 +1329,19 @@ struct TextArea : TextEdit {
         r := self._row_of(rows, self.cursor)
         row: List = rows[r]
         ra: Int = row[0]
-        if self._goal < 0 { self._goal = self.cursor - ra }
+        // The goal is a pixel offset, so the cursor stays above itself with
+        // a proportional font.
+        if self._goal < 0 { self._goal = self._span_w(ra, self.cursor) }
         target := r + by
         if target < 0 {
             self._move(0, grow)
         } elif target >= rows.length() {
             self._move(self.text.length(), grow)
         } else {
-            self._move(self._at_row(rows, target, self._goal), grow)
+            trow: List = rows[target]
+            tra: Int = trow[0]
+            trb: Int = trow[1]
+            self._move(self._at_row(rows, target, self._index_near(tra, trb, self._goal) - tra), grow)
         }
     }
 
@@ -1322,7 +1392,7 @@ struct TextArea : TextEdit {
             border = mix(t.border, t.text, 30)
         }
         win.rect(self.x, self.y, self.width, self.height, border, fill=false)
-        cw := t.char_w()
+        self._t = t
         lh := t.line()
         shown := self._shown_rows()
         cols := self._shown_cols()
@@ -1338,7 +1408,7 @@ struct TextArea : TextEdit {
             if cr >= self._top + shown { self._top = cr - shown + 1 }
             if not self.wrap {
                 if cc < self._left { self._left = cc }
-                if cc > self._left + cols { self._left = cc - cols }
+                while self._left < cc and self._span_w(cra + self._left, self.cursor) > self.width - 16 { self._left = self._left + 1 }
             }
         }
         self._top = _clamp(self._top, 0, _max(0, rows.length() - 1))
@@ -1363,20 +1433,22 @@ struct TextArea : TextEdit {
                     hard = na != rb
                 }
                 if hard and sb > rb and sa <= rb and rb < self.text.length() { extra = 1 }
-                ca := a - ra - self._left
-                cb := b - ra - self._left + extra
-                if cb > ca and (b > a or extra == 1) {
-                    win.rect(self.x + 8 + _max(0, ca) * cw, ly, (cb - _max(0, ca)) * cw, lh, _sel_color(self, t))
+                start := ra + self._left
+                sa2 := _max(a, start)
+                if b > sa2 or (extra == 1 and b >= sa2) {
+                    x1 := self.x + 8 + self._span_w(start, sa2)
+                    x2 := self.x + 8 + self._span_w(start, _max(b, sa2)) + extra * self._cw
+                    if x2 > x1 { win.rect(x1, ly, x2 - x1, lh, _sel_color(self, t)) }
                 }
             }
             if rb - ra > self._left {
-                win.text(self.text.substring(ra + self._left, _min(rb, ra + self._left + cols + 1)), self.x + 8, ly,
-                         _ink(self, t.text, t), scale=t.scale)
+                win.text(self.text.substring(ra + self._left, rb), self.x + 8, ly,
+                         _ink(self, t.text, t), scale=t.scale, font=t.font)
             }
             r = r + 1
         }
         if self.focused and (window.ticks() / 530) % 2 == 0 and cr >= self._top and cr < self._top + shown {
-            win.rect(self.x + 8 + (cc - self._left) * cw, self.y + 6 + (cr - self._top) * lh, _max(1, t.scale), lh, t.text)
+            win.rect(self.x + 8 + self._span_w(cra + self._left, self.cursor), self.y + 6 + (cr - self._top) * lh, _max(1, t.scale), lh, t.text)
         }
         _clip_pop(win)
         // Scroll indicator when there are more rows than fit.
@@ -1525,7 +1597,7 @@ struct RadioGroup : Widget {
     define measure(self, t: Theme) -> void {
         self._row_h = t.line() + 8
         widest := 0
-        for o in self.options { widest = _max(widest, window.text_width(o.str(), t.scale)) }
+        for o in self.options { widest = _max(widest, t.text_w(o.str())) }
         self.min_w = t.line() + t.char_w() + widest
         self.min_h = _max(1, self.options.length()) * self._row_h
     }
@@ -1572,7 +1644,7 @@ struct RadioGroup : Widget {
             win.circle(cx, cy, r, t.input)
             win.circle(cx, cy, r, ring, fill=false)
             if i == self.selected { win.circle(cx, cy, _max(2, r / 2), _ink(self, t.accent, t)) }
-            win.text(self.options[i].str(), self.x + s + t.char_w(), cy - t.line() / 2, _ink(self, t.text, t), scale=t.scale)
+            win.text(self.options[i].str(), self.x + s + t.char_w(), cy - t.line() / 2, _ink(self, t.text, t), scale=t.scale, font=t.font)
             i = i + 1
         }
         if self.focused { _focus_ring(win, self, t) }
@@ -1617,10 +1689,68 @@ struct ProgressBar : Widget {
         win.rect(self.x, self.y, self.width, self.height, t.border, fill=false)
         if self.show_text {
             label := self.percent().str() + "%"
-            tw := window.text_width(label, t.scale)
-            win.text(label, self.x + (self.width - tw) / 2, self.y + (self.height - t.line()) / 2, t.text, scale=t.scale)
+            tw := t.text_w(label)
+            win.text(label, self.x + (self.width - tw) / 2, self.y + (self.height - t.line()) / 2, t.text, scale=t.scale, font=t.font)
         }
     }
+}
+
+// ===== ListItem (an entry with an icon) =====
+
+---
+An entry for a ListView or a Table cell with an `icon` (an image file,
+drawn at the text's height) before its `text`; `data` keeps anything you
+want with it. Its `.str()` is `text`, so sorting and `on_select` work as
+with plain strings.
+---
+struct ListItem {
+    text: String
+    icon: String
+    data: Any
+    _img: window.Image
+    _failed: Bool
+
+    define __init(self, text: String, icon: String = "", data: Any = null) -> void {
+        self.text = text
+        self.icon = icon
+        self.data = data
+        self._img = null
+        self._failed = false
+    }
+
+    define __str(self) -> String {
+        return self.text
+    }
+
+    // Draw the icon and text from (x, y) in a row `h` tall, `maxw` wide.
+    define draw(self, win: window.Window, t: Theme, x: Int, y: Int, h: Int, maxw: Int, color: Int) -> void {
+        tx := x
+        if self.icon.length() > 0 {
+            if self._img == null and not self._failed {
+                try {
+                    self._img = win.load_image(self.icon)
+                } catch (err: window.WindowError) {
+                    self._failed = true
+                }
+            }
+            sz := _min(h - 4, t.line())
+            if self._img != null { win.image(self._img, x, y + (h - sz) / 2, width=sz, height=sz) }
+            tx = x + sz + t.char_w() / 2
+        }
+        win.text(t.fit(self.text, maxw - (tx - x)), tx, y + (h - t.line()) / 2, color, scale=t.scale, font=t.font)
+    }
+}
+
+// Draw a list / table entry: a ListItem with its icon, anything else as text.
+define _draw_entry(win: window.Window, t: Theme, value: Any, x: Int, y: Int, h: Int, maxw: Int, color: Int) -> void {
+    if value != null and type(value) == "ListItem" {
+        li: ListItem = value
+        li.draw(win, t, x, y, h, maxw, color)
+        return
+    }
+    label := "None"
+    if value != null { label = value.str() }
+    win.text(t.fit(label, maxw), x, y + (h - t.line()) / 2, color, scale=t.scale, font=t.font)
 }
 
 // ===== ListView =====
@@ -1707,7 +1837,7 @@ struct ListView : Widget {
 
     define measure(self, t: Theme) -> void {
         widest := 10
-        for it in self.items { widest = _max(widest, window.text_width(it.str(), t.scale)) }
+        for it in self.items { widest = _max(widest, t.text_w(it.str())) }
         self.min_w = _min(widest, 60 * t.char_w()) + 16
         self.min_h = self.rows * self._row_h() + 4
     }
@@ -1777,10 +1907,7 @@ struct ListView : Widget {
                 win.rect(self.x + 2, ry, self.width - 4, rh, _ink(self, t.accent, t))
                 ink = t.accent_text
             }
-            label := self.items[i].str()
-            fit := _max(1, (self.width - 16) / t.char_w())
-            if label.length() > fit { label = label.substring(0, fit) }
-            win.text(label, self.x + 8, ry + (rh - t.line()) / 2, _ink(self, ink, t), scale=t.scale)
+            _draw_entry(win, t, self.items[i], self.x + 8, ry, rh, self.width - 16, _ink(self, ink, t))
             i = i + 1
         }
         // Where a dragged row would land.
@@ -1973,7 +2100,7 @@ struct ToolButton : Widget {
         if self.icon.length() > 0 { w = w + self._icon_size(t) }
         if self.text.length() > 0 {
             if self.icon.length() > 0 { w = w + t.char_w() / 2 }
-            w = w + window.text_width(self.text, t.scale)
+            w = w + t.text_w(self.text)
         }
         self.min_w = w
         self.min_h = _max(t.line(), self._icon_size(t)) + 12
@@ -2029,7 +2156,7 @@ struct ToolButton : Widget {
             x = x + sz + t.char_w() / 2
         }
         if self.text.length() > 0 {
-            win.text(self.text, x, self.y + (self.height - t.line()) / 2, _ink(self, t.text, t), scale=t.scale)
+            win.text(self.text, x, self.y + (self.height - t.line()) / 2, _ink(self, t.text, t), scale=t.scale, font=t.font)
         }
         if self.focused { _focus_ring(win, self, t) }
     }
@@ -2080,7 +2207,7 @@ struct StatusBar : Widget {
 
     define measure(self, t: Theme) -> void {
         w := 0
-        for sct in self.sections { w = w + window.text_width(sct.str(), t.scale) + 3 * t.char_w() }
+        for sct in self.sections { w = w + t.text_w(sct.str()) + 3 * t.char_w() }
         self.min_w = w
         self.min_h = t.line() + 8
     }
@@ -2090,14 +2217,14 @@ struct StatusBar : Widget {
         win.rect(self.x, self.y, self.width, 1, t.border)
         ty := self.y + (self.height - t.line()) / 2
         if self.sections.length() == 0 { return }
-        win.text(self.get(0), self.x + t.char_w(), ty, t.muted, scale=t.scale)
+        win.text(self.get(0), self.x + t.char_w(), ty, t.muted, scale=t.scale, font=t.font)
         rx := self.x + self.width - t.char_w()
         i := self.sections.length() - 1
         while i >= 1 {
             text := self.get(i)
-            tw := window.text_width(text, t.scale)
+            tw := t.text_w(text)
             rx = rx - tw
-            win.text(text, rx, ty, t.muted, scale=t.scale)
+            win.text(text, rx, ty, t.muted, scale=t.scale, font=t.font)
             rx = rx - t.char_w()
             win.rect(rx, self.y + 4, 1, self.height - 8, t.border)
             rx = rx - t.char_w()
@@ -2246,7 +2373,7 @@ struct DatePicker : Widget {
     }
 
     define measure(self, t: Theme) -> void {
-        self.min_w = window.text_width("0000-00-00", t.scale) + 16 + 3 * t.char_w()
+        self.min_w = t.text_w("0000-00-00") + 16 + 3 * t.char_w()
         self.min_h = t.line() + 12
     }
 
@@ -2329,7 +2456,7 @@ struct DatePicker : Widget {
         border := t.border
         if self.focused or self.is_open { border = t.accent }
         win.rect(self.x, self.y, self.width, self.height, border, fill=false)
-        win.text(self.text(), self.x + 8, self.y + (self.height - t.line()) / 2, _ink(self, t.text, t), scale=t.scale)
+        win.text(self.text(), self.x + 8, self.y + (self.height - t.line()) / 2, _ink(self, t.text, t), scale=t.scale, font=t.font)
         // A small calendar glyph on the right.
         gx := self.x + self.width - 8 - 2 * t.char_w()
         gy := self.y + (self.height - t.line()) / 2 + 2
@@ -2356,16 +2483,16 @@ struct DatePicker : Widget {
         win.rect(x, y, self._pw, self._ph, t.border, fill=false)
         // Header: < Month Year >
         hy := y + 6 + (c - t.line()) / 2
-        win.text("<", x + 6 + (c - t.char_w()) / 2, hy, t.text, scale=t.scale)
-        win.text(">", x + self._pw - 6 - c + (c - t.char_w()) / 2, hy, t.text, scale=t.scale)
+        win.text("<", x + 6 + (c - t.char_w()) / 2, hy, t.text, scale=t.scale, font=t.font)
+        win.text(">", x + self._pw - 6 - c + (c - t.char_w()) / 2, hy, t.text, scale=t.scale, font=t.font)
         title := _MONTHS[self._vm - 1].str() + " " + self._vy.str()
-        win.text(title, x + (self._pw - window.text_width(title, t.scale)) / 2, hy, t.text, scale=t.scale)
+        win.text(title, x + (self._pw - t.text_w(title)) / 2, hy, t.text, scale=t.scale, font=t.font)
         // Weekday names.
         names := ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"]
         i := 0
         while i < 7 {
             wd: String = names[i]
-            win.text(wd, x + 6 + i * c + (c - window.text_width(wd, t.scale)) / 2, y + 6 + c + (c - t.line()) / 2, t.muted, scale=t.scale)
+            win.text(wd, x + 6 + i * c + (c - t.text_w(wd)) / 2, y + 6 + c + (c - t.line()) / 2, t.muted, scale=t.scale, font=t.font)
             i = i + 1
         }
         // Days.
@@ -2384,7 +2511,7 @@ struct DatePicker : Widget {
             }
             if d == self._cursor { win.rect(cx + 1, cy + 1, c - 2, c - 2, t.focus, fill=false) }
             label := d.str()
-            win.text(label, cx + (c - window.text_width(label, t.scale)) / 2, cy + (c - t.line()) / 2, ink, scale=t.scale)
+            win.text(label, cx + (c - t.text_w(label)) / 2, cy + (c - t.line()) / 2, ink, scale=t.scale, font=t.font)
             d = d + 1
         }
     }
@@ -2602,7 +2729,7 @@ struct ColorPicker : Widget {
         by := self.y + self.size + 8
         win.rect(self.x, by, 3 * t.line(), t.line() + 4, self.color)
         win.rect(self.x, by, 3 * t.line(), t.line() + 4, t.border, fill=false)
-        win.text(self.hex(), self.x + 3 * t.line() + t.char_w(), by + 2, _ink(self, t.text, t), scale=t.scale)
+        win.text(self.hex(), self.x + 3 * t.line() + t.char_w(), by + 2, _ink(self, t.text, t), scale=t.scale, font=t.font)
         if self.focused { _focus_ring(win, self, t) }
     }
 }
@@ -2748,7 +2875,7 @@ struct TreeView : Widget {
         widest := 10
         for c in self.visible_nodes() {
             n: TreeNode = c
-            widest = _max(widest, n.depth() * self._ind + 16 + window.text_width(n.text, t.scale))
+            widest = _max(widest, n.depth() * self._ind + 16 + t.text_w(n.text))
         }
         self.min_w = _min(widest, 60 * t.char_w()) + 16
         self.min_h = self.rows * self._row_h() + 4
@@ -2845,7 +2972,7 @@ struct TreeView : Widget {
                     r = r + 1
                 }
             }
-            win.text(n.text, ax + 14, ry + (rh - t.line()) / 2, _ink(self, ink, t), scale=t.scale)
+            win.text(n.text, ax + 14, ry + (rh - t.line()) / 2, _ink(self, ink, t), scale=t.scale, font=t.font)
             i = i + 1
         }
         _clip_pop(win)
@@ -3078,10 +3205,10 @@ struct Table : Widget {
             if c < self.widths.length() {
                 out.append(self.widths[c])
             } else {
-                w := window.text_width(self.columns[c].str(), t.scale) + 3 * t.char_w()
+                w := t.text_w(self.columns[c].str()) + 3 * t.char_w()
                 r := 0
                 while r < self.rows.length() {
-                    w = _max(w, window.text_width(self._cell(r, c), t.scale) + 2 * t.char_w())
+                    w = _max(w, t.text_w(self._cell(r, c)) + 2 * t.char_w())
                     r = r + 1
                 }
                 out.append(_min(w, 40 * t.char_w()))
@@ -3233,7 +3360,7 @@ struct Table : Widget {
             if c == self.sort_column {
                 if self.sort_descending { label = label + " v" } else { label = label + " ^" }
             }
-            win.text(label, x + t.char_w(), hy + (rh - t.line()) / 2, t.text, scale=t.scale)
+            win.text(label, x + t.char_w(), hy + (rh - t.line()) / 2, t.text, scale=t.scale, font=t.font)
             if c > 0 { win.rect(x, hy + 4, 1, rh - 8, t.border) }
             x = x + w
             c = c + 1
@@ -3255,10 +3382,10 @@ struct Table : Widget {
             c = 0
             while c < self.columns.length() {
                 w: Int = ws[c]
-                cell := self._cell(ri, c)
-                fit := _max(1, (w - 2 * t.char_w()) / t.char_w())
-                if cell.length() > fit { cell = cell.substring(0, fit) }
-                win.text(cell, x + t.char_w(), ry + (rh - t.line()) / 2, _ink(self, ink, t), scale=t.scale)
+                rowl: List = self.rows[ri]
+                if c < rowl.length() {
+                    _draw_entry(win, t, rowl[c], x + t.char_w(), ry, rh, w - 2 * t.char_w(), _ink(self, ink, t))
+                }
                 x = x + w
                 c = c + 1
             }
@@ -3536,7 +3663,7 @@ struct Dropdown : Widget {
 
     define measure(self, t: Theme) -> void {
         widest := 4 * t.char_w()
-        for o in self.options { widest = _max(widest, window.text_width(o.str(), t.scale)) }
+        for o in self.options { widest = _max(widest, t.text_w(o.str())) }
         self.min_w = widest + 16 + 3 * t.char_w()
         self.min_h = t.line() + 12
     }
@@ -3594,9 +3721,8 @@ struct Dropdown : Widget {
         win.rect(self.x, self.y, self.width, self.height, border, fill=false)
         cw := t.char_w()
         label := self.text()
-        fit := _max(1, (self.width - 16 - 3 * cw) / cw)
-        if label.length() > fit { label = label.substring(0, fit) }
-        win.text(label, self.x + 8, self.y + (self.height - t.line()) / 2, _ink(self, t.text, t), scale=t.scale)
+        label = t.fit(label, self.width - 16 - 3 * cw)
+        win.text(label, self.x + 8, self.y + (self.height - t.line()) / 2, _ink(self, t.text, t), scale=t.scale, font=t.font)
         // The arrow: a small filled triangle pointing down.
         ax := self.x + self.width - 8 - cw
         ay := self.y + self.height / 2 - 2
@@ -3647,7 +3773,7 @@ struct Dropdown : Widget {
         win.rect(self._px + 3, self._py + 3, self._pw, self._ph, mix(t.background, window.black(), 45))   // shadow
         win.rect(self._px, self._py, self._pw, self._ph, t.surface)
         win.rect(self._px, self._py, self._pw, self._ph, t.border, fill=false)
-        fit := _max(1, (self._pw - 16) / t.char_w())
+        fit := self._pw - 16
         i := self._top
         while i < self.options.length() and i < self._top + rows {
             ry := self._py + 2 + (i - self._top) * rh
@@ -3659,8 +3785,8 @@ struct Dropdown : Widget {
                 win.rect(self._px + 2, ry, self._pw - 4, rh, mix(t.accent, t.surface, 75))
             }
             label := self.options[i].str()
-            if label.length() > fit { label = label.substring(0, fit) }
-            win.text(label, self._px + 8, ry + (rh - t.line()) / 2, ink, scale=t.scale)
+            label = t.fit(label, fit)
+            win.text(label, self._px + 8, ry + (rh - t.line()) / 2, ink, scale=t.scale, font=t.font)
             i = i + 1
         }
         if self.options.length() > rows {
@@ -3732,7 +3858,7 @@ struct Tabs : Widget {
     define measure(self, t: Theme) -> void {
         self._tab_h = t.line() + 12
         tw := 0
-        for title in self.titles { tw = tw + window.text_width(title.str(), t.scale) + 3 * t.char_w() }
+        for title in self.titles { tw = tw + t.text_w(title.str()) + 3 * t.char_w() }
         pw := 0
         ph := 0
         for pg in self.pages {
@@ -3798,7 +3924,7 @@ struct Tabs : Widget {
         i := 0
         while i < self.titles.length() {
             title := self.titles[i].str()
-            w := window.text_width(title, t.scale) + 3 * t.char_w()
+            w := t.text_w(title) + 3 * t.char_w()
             bg := t.background
             ink := t.muted
             if i == self.selected {
@@ -3813,8 +3939,8 @@ struct Tabs : Widget {
                 win.rect(tx + 1, self.y + th, w - 2, 1, t.surface)                 // open into the page
                 win.rect(tx, self.y, w, 2, _ink(self, t.accent, t))
             }
-            win.text(title, tx + (w - window.text_width(title, t.scale)) / 2, self.y + (th - t.line()) / 2,
-                     _ink(self, ink, t), scale=t.scale)
+            win.text(title, tx + (w - t.text_w(title)) / 2, self.y + (th - t.line()) / 2,
+                     _ink(self, ink, t), scale=t.scale, font=t.font)
             tx = tx + w
             xs.append(tx)
             i = i + 1
@@ -4036,8 +4162,8 @@ struct Menu : Widget {
         i := 0
         while i < self.items.length() {
             it := self._item(i)
-            widest = _max(widest, window.text_width(it.text, t.scale))
-            hint = _max(hint, window.text_width(it.shortcut, t.scale))
+            widest = _max(widest, t.text_w(it.text))
+            hint = _max(hint, t.text_w(it.shortcut))
             h = h + self._row_h(i)
             i = i + 1
         }
@@ -4065,12 +4191,12 @@ struct Menu : Widget {
                     ink = t.accent_text
                 }
                 ty := y + (rh - t.line()) / 2
-                win.text(it.text, self._px + 2 * cw, ty, ink, scale=t.scale)
+                win.text(it.text, self._px + 2 * cw, ty, ink, scale=t.scale, font=t.font)
                 if it.shortcut.length() > 0 {
-                    sw := window.text_width(it.shortcut, t.scale)
+                    sw := t.text_w(it.shortcut)
                     sink := t.muted
                     if i == self._hover { sink = t.accent_text }
-                    win.text(it.shortcut, self._px + self._pw - 2 * cw - sw, ty, sink, scale=t.scale)
+                    win.text(it.shortcut, self._px + self._pw - 2 * cw - sw, ty, sink, scale=t.scale, font=t.font)
                 }
             }
             y = y + rh
@@ -4110,7 +4236,7 @@ struct MenuBar : Widget {
 
     define measure(self, t: Theme) -> void {
         w := 0
-        for title in self.titles { w = w + window.text_width(title.str(), t.scale) + 2 * t.char_w() }
+        for title in self.titles { w = w + t.text_w(title.str()) + 2 * t.char_w() }
         self.min_w = w
         self.min_h = t.line() + 10
     }
@@ -4180,13 +4306,13 @@ struct MenuBar : Widget {
         i := 0
         while i < self.titles.length() {
             title := self.titles[i].str()
-            w := window.text_width(title, t.scale) + 2 * t.char_w()
+            w := t.text_w(title) + 2 * t.char_w()
             ink := t.text
             if i == self._open {
                 win.rect(tx, self.y, w, self.height - 1, t.accent)
                 ink = t.accent_text
             }
-            win.text(title, tx + t.char_w(), self.y + (self.height - t.line()) / 2, ink, scale=t.scale)
+            win.text(title, tx + t.char_w(), self.y + (self.height - t.line()) / 2, ink, scale=t.scale, font=t.font)
             tx = tx + w
             xs.append(tx)
             i = i + 1
@@ -4459,11 +4585,15 @@ struct FileDialog : Widget {
         win.rect(x, y, w, h, t.surface)
         win.rect(x, y, w, h, t.border, fill=false)
         lh := t.line()
-        win.text(self.title, x + 12, y + 10, t.text, scale=t.scale)
+        win.text(self.title, x + 12, y + 10, t.text, scale=t.scale, font=t.font)
         shown_dir := self.dir
-        fit := _max(4, (w - 24) / t.char_w())
-        if shown_dir.length() > fit { shown_dir = "..." + shown_dir.substring(shown_dir.length() - fit + 3, shown_dir.length()) }
-        win.text(shown_dir, x + 12, y + 10 + lh + 4, t.muted, scale=t.scale)
+        // Too long: keep the end ("...quirk/packages").
+        if t.text_w(shown_dir) > w - 24 {
+            cut := 0
+            while cut < shown_dir.length() and t.text_w("..." + shown_dir.substring(cut, shown_dir.length())) > w - 24 { cut = cut + 1 }
+            shown_dir = "..." + shown_dir.substring(cut, shown_dir.length())
+        }
+        win.text(shown_dir, x + 12, y + 10 + lh + 4, t.muted, scale=t.scale, font=t.font)
         top := y + 10 + 2 * lh + 14
         bottom := y + h - 12 - (lh + 12)          // the buttons row
         if self.mode == "save" { bottom = bottom - (lh + 12) - 8 }
@@ -4525,6 +4655,129 @@ define _sorted_names(names: List) -> List {
         i = i + 1
     }
     return out
+}
+
+// ===== Canvas =====
+
+---
+A widget you draw yourself: `on_draw(win, x, y, width, height)` runs every
+frame (drawing is clipped to the canvas), `on_event(e)` gets its mouse
+events (coordinates are the window's) and keys while it has the focus.
+`width` / `height` are the size it asks for; with `expand` it takes free
+space.
+---
+struct Canvas : Widget {
+    on_draw: Callable
+    on_event: Callable
+    want_w: Int
+    want_h: Int
+
+    define __init(self, on_draw: Callable = null, on_event: Callable = null, width: Int = 200, height: Int = 150, expand: Bool = false, focusable: Bool = false) -> void {
+        super().__init()
+        self.on_draw = on_draw
+        self.on_event = on_event
+        self.want_w = width
+        self.want_h = height
+        self.expand = expand
+        self.focusable = focusable
+        self.takes_clicks = true
+    }
+
+    define measure(self, t: Theme) -> void {
+        self.min_w = self.want_w
+        self.min_h = self.want_h
+    }
+
+    define handle(self, e: window.Event) -> Bool {
+        if not self.enabled or self.on_event == null { return false }
+        self.on_event(e)
+        return true
+    }
+
+    define draw(self, win: window.Window, t: Theme) -> void {
+        if self.on_draw == null { return }
+        _clip_push(win, self.x, self.y, self.width, self.height)
+        self.on_draw(win, self.x, self.y, self.width, self.height)
+        _clip_pop(win)
+    }
+}
+
+// ===== Animation =====
+
+--- `a` + (`b` - `a`) * `t` (t from 0.0 to 1.0), rounded. ---
+define lerp(a: Int, b: Int, t: Double) -> Int {
+    r := a.to_float() + (b - a).to_float() * t
+    if r >= 0.0 { return (r + 0.5).to_int() }
+    return (r - 0.5).to_int()
+}
+
+---
+Easing: progress `t` (0.0-1.0) reshaped — "linear", "in" (starts slow),
+"out" (ends slow), "in_out" (both), "back" (overshoots a little, then
+settles).
+---
+define ease(name: String, t: Double) -> Double {
+    x := t
+    if x < 0.0 { x = 0.0 }
+    if x > 1.0 { x = 1.0 }
+    if name == "in" { return x * x * x }
+    if name == "out" {
+        y := 1.0 - x
+        return 1.0 - y * y * y
+    }
+    if name == "in_out" {
+        if x < 0.5 { return 4.0 * x * x * x }
+        y := -2.0 * x + 2.0
+        return 1.0 - y * y * y / 2.0
+    }
+    if name == "back" {
+        c := 1.70158
+        y := x - 1.0
+        return 1.0 + (c + 1.0) * y * y * y + c * y * y
+    }
+    return x
+}
+
+---
+A running animation (`app.animate`). `cancel()` stops it (no more
+`on_step`, no `on_done`); `done` says whether it has finished.
+---
+struct Animation {
+    start: Int
+    duration: Int
+    on_step: Callable
+    on_done: Callable
+    easing: String
+    done: Bool
+
+    define __init(self, duration: Int, on_step: Callable, easing: String, on_done: Callable) -> void {
+        self.start = window.ticks()
+        self.duration = _max(0, duration)
+        self.on_step = on_step
+        self.on_done = on_done
+        self.easing = easing
+        self.done = false
+    }
+
+    --- Stop it where it is. ---
+    define cancel(self) -> void {
+        self.done = true
+    }
+
+    // Run one frame at time `now`; true while it's still going.
+    define _tick(self, now: Int) -> Bool {
+        if self.done { return false }
+        p := 1.0
+        if self.duration > 0 { p = (now - self.start).to_float() / self.duration.to_float() }
+        if p > 1.0 { p = 1.0 }
+        if self.on_step != null { self.on_step(ease(self.easing, p)) }
+        if p >= 1.0 {
+            self.done = true
+            if self.on_done != null { self.on_done() }
+            return false
+        }
+        return true
+    }
 }
 
 // ===== App =====
@@ -4622,6 +4875,7 @@ struct App {
     _drag_from_y: Int
     _drag_data: Any
     _dragging: Bool
+    _anims: List
 
     define __init(self, title: String, width: Int, height: Int, theme: Theme = null, resizable: Bool = true, headless: Bool = false) -> void {
         self.win = window.open(title, width, height, resizable=resizable, headless=headless)
@@ -4645,7 +4899,41 @@ struct App {
         self._drag_from_y = 0
         self._drag_data = null
         self._dragging = false
+        self._anims = []
         _close_popups()
+    }
+
+    ---
+    Animate over `duration` ms: `on_step(t)` runs every frame with the
+    eased progress `t` (0.0 → 1.0; the last call is exactly 1.0), then
+    `on_done()`. `ease` is "linear", "in", "out", "in_out" or "back".
+    @example
+    app.animate(300, fn(t) { panel.x_offset = ui.lerp(-200, 0, t) }, ease="out")
+    ---
+    define animate(self, duration: Int, on_step: Callable, ease: String = "in_out", on_done: Callable = null) -> Animation {
+        a := Animation(duration, on_step, ease, on_done)
+        self._anims.append(a)
+        return a
+    }
+
+    --- True while an animation is running. ---
+    define animating(self) -> Bool {
+        for a in self._anims {
+            an: Animation = a
+            if not an.done { return true }
+        }
+        return false
+    }
+
+    define _run_animations(self) -> void {
+        if self._anims.length() == 0 { return }
+        now := window.ticks()
+        live := []
+        for a in self._anims {
+            an: Animation = a
+            if an._tick(now) { live.append(an) }
+        }
+        self._anims = live
     }
 
     --- True while something is being dragged (see `Widget.on_drag`). ---
@@ -4923,6 +5211,7 @@ struct App {
             self.dispatch(e)
         }
         if not self.win.is_open() { return false }
+        self._run_animations()
         if self.on_frame != null { self.on_frame() }
         if not self.win.is_open() { return false }
         self.layout()
@@ -4944,10 +5233,10 @@ struct App {
             label := "?"
             if self._drag_data != null { label = self._drag_data.str() }
             if label.length() > 30 { label = label.substring(0, 30) + "..." }
-            lw := window.text_width(label, t.scale) + 12
+            lw := t.text_w(label) + 12
             self.win.rect(self._mx + 12, self._my + 8, lw, t.line() + 6, mix(t.surface, t.accent, 25))
             self.win.rect(self._mx + 12, self._my + 8, lw, t.line() + 6, t.accent, fill=false)
-            self.win.text(label, self._mx + 18, self._my + 11, t.text, scale=t.scale)
+            self.win.text(label, self._mx + 18, self._my + 11, t.text, scale=t.scale, font=t.font)
         }
         for o in _popups {
             p: Widget = o
@@ -4963,14 +5252,14 @@ struct App {
 
     define _draw_tip(self, text: String) -> void {
         t := self.theme
-        tw := window.text_width(text, t.scale) + 12
+        tw := t.text_w(text) + 12
         th := text.split("\n").length() * t.line() + 8
         tx := _clamp(self._mx + 12, 0, _max(0, self.win.width() - tw))
         ty := self._my + 20
         if ty + th > self.win.height() { ty = _max(0, self._my - th - 4) }
         self.win.rect(tx, ty, tw, th, mix(t.surface, t.text, 12))
         self.win.rect(tx, ty, tw, th, t.border, fill=false)
-        self.win.text(text, tx + 6, ty + 4, t.text, scale=t.scale)
+        self.win.text(text, tx + 6, ty + 4, t.text, scale=t.scale, font=t.font)
     }
 
     --- Run until the window closes, about `fps` frames a second. ---

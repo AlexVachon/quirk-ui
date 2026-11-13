@@ -37,6 +37,8 @@ app.run()
 | `ui.Table(columns, rows, on_select=, visible_rows=, editable=, on_edit=)` | Rows of values under headers; click a header to sort (again: reverse); `on_select(index, row)`; with `editable=true`, double-click / Enter / F2 edits a cell, `on_edit(index, column, value)` |
 | `ui.DatePicker(year, month, day, on_change=)` | A date field with a month calendar; `text()` is "YYYY-MM-DD"; `ui.days_in_month`, `ui.weekday` |
 | `ui.ColorPicker(color=, on_change=)` | Saturation / brightness square, hue strip, swatch with its hex code; `ui.hsv_to_color`, `ui.color_to_hsv` |
+| `ui.ListItem(text, icon=, data=)` | An entry with an image icon, for a ListView or a Table cell; `.str()` is its text |
+| `ui.Canvas(on_draw=, on_event=, width=, height=)` | Draw it yourself: `on_draw(win, x, y, w, h)` each frame (clipped), `on_event(e)` for its mouse / key events |
 | `ui.ListView(..., reorderable=, on_reorder=)` | With `reorderable=true` rows move by dragging; `on_reorder(from, to)` |
 
 ## Menus
@@ -58,6 +60,24 @@ anywhere in the window — menu bar items always, a right-click menu's
 while its widget has the focus. `app.on_key` sees every key first. Any widget can have a right-click menu:
 `widget.context_menu = ui.Menu([...])`; `menu.open_at(x, y)` opens one
 from code.
+
+## Fonts and animation
+
+```quirk
+app.theme.font = window.load_font("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 15)
+```
+
+Every widget then lays out and draws in that font (proportional text,
+any character it has — text fields place the cursor by real widths).
+Without one, the built-in 8x16 font is used.
+
+```quirk
+app.animate(250, fn(t) { box.width = ui.lerp(40, 300, t) }, ease="out", on_done=fn() { print("done") })
+```
+
+`on_step(t)` gets the eased progress each frame (the last call is 1.0);
+`ease` is "linear", "in", "out", "in_out" or "back". `animate` returns an
+`Animation` with `cancel()`; `app.animating()` says whether one runs.
 
 ## Window layout
 
@@ -129,7 +149,7 @@ Your own widgets: subclass `ui.Widget` and override `measure`, `draw`,
 
 ## Requirements
 
-- The Quirk compiler 7.32.0+ and `window` 1.2.0+ (clipping, the clipboard).
+- The Quirk compiler 7.33.0+ and `window` 1.3.0+ (clipping, the clipboard, fonts).
 - SDL2 for `window` (`sudo apt install libsdl2-2.0-0` / `brew install sdl2`).
 
 Bundled with the compiler at `<QUIRK_HOME>/packages/ui/`, so `use ui`
