@@ -1395,7 +1395,6 @@ struct TextArea : TextEdit {
         self._t = t
         lh := t.line()
         shown := self._shown_rows()
-        cols := self._shown_cols()
         rows := self.layout()
         if self.wrap { self._left = 0 }
         // Follow the cursor.
@@ -1729,7 +1728,7 @@ struct ListItem {
             if self._img == null and not self._failed {
                 try {
                     self._img = win.load_image(self.icon)
-                } catch (err: window.WindowError) {
+                } catch (window.WindowError) {
                     self._failed = true
                 }
             }
@@ -2140,7 +2139,7 @@ struct ToolButton : Widget {
             if self._img == null and not self._img_failed {
                 try {
                     self._img = win.load_image(self.icon)
-                } catch (err: window.WindowError) {
+                } catch (window.WindowError) {
                     self._img_failed = true
                 }
             }
