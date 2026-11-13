@@ -35,6 +35,7 @@ app.run()
 | `ui.Dropdown(options, selected=, on_change=)` | Pick one from a list that opens below; `on_change(index, item)` |
 | `ui.TreeView(roots, on_select=, rows=)` | `ui.TreeNode(text, children, expanded=, data=)`s; click the arrow / double-click / Left / Right to expand and collapse |
 | `ui.Table(columns, rows, on_select=, visible_rows=, editable=, on_edit=)` | Rows of values under headers; click a header to sort (again: reverse); `on_select(index, row)`; with `editable=true`, double-click / Enter / F2 edits a cell, `on_edit(index, column, value)` |
+| `ui.DatePicker(year, month, day, on_change=)` | A date field with a month calendar; `text()` is "YYYY-MM-DD"; `ui.days_in_month`, `ui.weekday` |
 | `ui.ColorPicker(color=, on_change=)` | Saturation / brightness square, hue strip, swatch with its hex code; `ui.hsv_to_color`, `ui.color_to_hsv` |
 | `ui.ListView(..., reorderable=, on_reorder=)` | With `reorderable=true` rows move by dragging; `on_reorder(from, to)` |
 
@@ -51,10 +52,29 @@ app.on_key = fn(e) { if e.ctrl and e.key == "o" { open_file() } }
 ```
 
 Click a title (or move over another while one is open); Up / Down /
-Enter / Escape, Left / Right between menus. `shortcut` is only the label
-— bind the keys with `app.on_key`. Any widget can have a right-click menu:
+Enter / Escape, Left / Right between menus. A `shortcut` ("Ctrl+S",
+"Ctrl+Shift+N", "F5", "Delete"; Ctrl is also Cmd) runs its item from
+anywhere in the window — menu bar items always, a right-click menu's
+while its widget has the focus. `app.on_key` sees every key first. Any widget can have a right-click menu:
 `widget.context_menu = ui.Menu([...])`; `menu.open_at(x, y)` opens one
 from code.
+
+## Window layout
+
+```quirk
+app.root = ui.Column([
+    ui.MenuBar(["File"], [file_menu]),
+    ui.Toolbar([ui.ToolButton("Save", icon="icons/save.png", on_click=save, tooltip="Save"),
+                ui.ToolButton("-"),
+                ui.ToolButton("Run", on_click=run)]),
+    ui.SplitView(file_list, editor, ratio=30),     // drag the divider
+    ui.StatusBar(["Ready", "Ln 1, Col 1"]),
+], spacing=0)
+```
+
+`ui.SplitView(a, b, vertical=false, ratio=50, min_size=40)`;
+`status.set(1, "Ln 7, Col 3")`. A ToolButton's icon is any image file
+(PNG, JPEG, BMP, GIF, TGA); a missing one draws as an empty box.
 
 ## Dialogs and drag and drop
 
@@ -109,7 +129,7 @@ Your own widgets: subclass `ui.Widget` and override `measure`, `draw`,
 
 ## Requirements
 
-- The Quirk compiler 7.31.0+ and `window` 1.2.0+ (clipping, the clipboard).
+- The Quirk compiler 7.32.0+ and `window` 1.2.0+ (clipping, the clipboard).
 - SDL2 for `window` (`sudo apt install libsdl2-2.0-0` / `brew install sdl2`).
 
 Bundled with the compiler at `<QUIRK_HOME>/packages/ui/`, so `use ui`

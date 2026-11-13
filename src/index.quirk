@@ -26,6 +26,9 @@ Menus:
   `ui.MenuBar(["File"], [ui.Menu([ui.MenuItem("Open", on_click=fn() => ...)])])`
   `widget.context_menu = ui.Menu([...])` — opened by a right-click
 Dialogs: `ui.FileDialog(mode="open"|"save"|"folder", dir=, on_pick=fn(path) => ...).show()`
+More: `ui.DatePicker(year, month, day)`, `ui.SplitView(a, b, vertical=)`,
+  `ui.Toolbar([ui.ToolButton("Save", icon="save.png", on_click=)])`,
+  `ui.StatusBar(["Ready", "Ln 1"])`; a MenuItem's `shortcut` works window-wide
 Drag and drop: `source.on_drag = fn() => data`, `target.on_drop = fn(data) => ...`;
   `ui.ListView(items, reorderable=true)` reorders by dragging
 Layout:
@@ -271,6 +274,11 @@ struct Widget {
 
     // Open this popup at (px, py) (Menu).
     define open_at(self, px: Int, py: Int) -> void {
+    }
+
+    // True for a MenuBar (its menus' shortcuts work window-wide).
+    define is_menu_bar(self) -> Bool {
+        return false
     }
 }
 
@@ -1791,6 +1799,597 @@ struct ListView : Widget {
     }
 }
 
+// ===== SplitView =====
+
+---
+Two widgets side by side (or stacked: `vertical=true`) with a divider
+you drag to share the space. `ratio` is the first pane's share in
+percent; `min_size` the smallest a pane gets (pixels). It takes its
+container's free space (`expand`) unless told otherwise.
+---
+struct SplitView : Widget {
+    first: Widget
+    second: Widget
+    vertical: Bool
+    ratio: Int
+    min_size: Int
+    on_change: Callable
+    _drag: Bool
+
+    define __init(self, first: Widget, second: Widget, vertical: Bool = false, ratio: Int = 50, min_size: Int = 40, expand: Bool = true, on_change: Callable = null) -> void {
+        super().__init()
+        self.first = first
+        self.second = second
+        self.vertical = vertical
+        self.ratio = _clamp(ratio, 0, 100)
+        self.min_size = min_size
+        self.expand = expand
+        self.on_change = on_change
+        self._drag = false
+        self.takes_clicks = true
+    }
+
+    define children(self) -> List {
+        return [self.first, self.second]
+    }
+
+    define _bar(self) -> Int {
+        return 6
+    }
+
+    define _span(self) -> Int {
+        if self.vertical { return self.height }
+        return self.width
+    }
+
+    // Size of the first pane in pixels.
+    define _first_px(self) -> Int {
+        room := self._span() - self._bar()
+        px := room * self.ratio / 100
+        lo := _min(self.min_size, room / 2)
+        return _clamp(px, lo, _max(lo, room - lo))
+    }
+
+    define measure(self, t: Theme) -> void {
+        self.first.measure(t)
+        self.second.measure(t)
+        if self.vertical {
+            self.min_w = _max(self.first.min_w, self.second.min_w)
+            self.min_h = 2 * self.min_size + self._bar()
+        } else {
+            self.min_w = 2 * self.min_size + self._bar()
+            self.min_h = _max(self.first.min_h, self.second.min_h)
+        }
+    }
+
+    define place(self, x: Int, y: Int, width: Int, height: Int) -> void {
+        self.x = x
+        self.y = y
+        self.width = width
+        self.height = height
+        a := self._first_px()
+        b := self._bar()
+        if self.vertical {
+            self.first.place(x, y, width, a)
+            self.second.place(x, y + a + b, width, _max(0, height - a - b))
+        } else {
+            self.first.place(x, y, a, height)
+            self.second.place(x + a + b, y, _max(0, width - a - b), height)
+        }
+    }
+
+    define _on_bar(self, px: Int, py: Int) -> Bool {
+        a := self._first_px()
+        if self.vertical { return py >= self.y + a and py < self.y + a + self._bar() }
+        return px >= self.x + a and px < self.x + a + self._bar()
+    }
+
+    define handle(self, e: window.Event) -> Bool {
+        if e.kind == "mouse_down" and e.button == 1 and self._on_bar(e.x, e.y) {
+            self._drag = true
+            return true
+        }
+        if e.kind == "mouse_move" and self._drag {
+            pos := e.x - self.x - self._bar() / 2
+            if self.vertical { pos = e.y - self.y - self._bar() / 2 }
+            room := _max(1, self._span() - self._bar())
+            nr := _clamp(pos * 100 / room, 0, 100)
+            if nr != self.ratio {
+                self.ratio = nr
+                if self.on_change != null { self.on_change(nr) }
+            }
+            return true
+        }
+        if e.kind == "mouse_up" {
+            self._drag = false
+            return true
+        }
+        return false
+    }
+
+    define draw(self, win: window.Window, t: Theme) -> void {
+        _clip_push(win, self.first.x, self.first.y, self.first.width, self.first.height)
+        if self.first.visible { self.first.draw(win, t) }
+        _clip_pop(win)
+        _clip_push(win, self.second.x, self.second.y, self.second.width, self.second.height)
+        if self.second.visible { self.second.draw(win, t) }
+        _clip_pop(win)
+        a := self._first_px()
+        bar := t.border
+        if self._drag or self.hovered { bar = t.accent }
+        if self.vertical {
+            win.rect(self.x, self.y + a + self._bar() / 2 - 1, self.width, 2, bar)
+        } else {
+            win.rect(self.x + a + self._bar() / 2 - 1, self.y, 2, self.height, bar)
+        }
+    }
+}
+
+// ===== Toolbar / StatusBar =====
+
+---
+A button for a `ui.Toolbar`: an `icon` (an image file — PNG, JPEG, BMP,
+GIF, TGA — drawn 16x16 times the theme scale) and / or `text`, plus a
+`tooltip`. `on_click` like a Button. `ui.ToolButton("-")` is a separator.
+---
+struct ToolButton : Widget {
+    text: String
+    icon: String
+    on_click: Callable
+    _img: window.Image
+    _img_failed: Bool
+
+    define __init(self, text: String = "", icon: String = "", on_click: Callable = null, tooltip: String = "") -> void {
+        super().__init()
+        self.text = text
+        self.icon = icon
+        self.on_click = on_click
+        self.tooltip = tooltip
+        self._img = null
+        self._img_failed = false
+        self.focusable = text != "-"
+    }
+
+    define is_separator(self) -> Bool {
+        return self.text == "-"
+    }
+
+    --- Press it from code. ---
+    define click(self) -> void {
+        if self.enabled and self.on_click != null { self.on_click() }
+    }
+
+    define _icon_size(self, t: Theme) -> Int {
+        return 16 * t.scale
+    }
+
+    define measure(self, t: Theme) -> void {
+        if self.is_separator() {
+            self.min_w = 9
+            self.min_h = t.line() + 12
+            return
+        }
+        w := 12
+        if self.icon.length() > 0 { w = w + self._icon_size(t) }
+        if self.text.length() > 0 {
+            if self.icon.length() > 0 { w = w + t.char_w() / 2 }
+            w = w + window.text_width(self.text, t.scale)
+        }
+        self.min_w = w
+        self.min_h = _max(t.line(), self._icon_size(t)) + 12
+    }
+
+    define handle(self, e: window.Event) -> Bool {
+        if not self.enabled or self.is_separator() { return false }
+        if e.kind == "mouse_down" and e.button == 1 {
+            self.pressed = true
+            return true
+        }
+        if e.kind == "mouse_up" and e.button == 1 {
+            was := self.pressed
+            self.pressed = false
+            if was and self.contains(e.x, e.y) { self.click() }
+            return true
+        }
+        if e.kind == "key_down" and (e.key == "return" or e.key == "space") {
+            self.click()
+            return true
+        }
+        return false
+    }
+
+    define draw(self, win: window.Window, t: Theme) -> void {
+        if self.is_separator() {
+            win.rect(self.x + 4, self.y + 4, 1, self.height - 8, t.border)
+            return
+        }
+        if self.pressed {
+            win.rect(self.x, self.y, self.width, self.height, mix(t.surface, window.black(), 20))
+        } elif self.hovered and self.enabled {
+            win.rect(self.x, self.y, self.width, self.height, mix(t.surface, t.text, 12))
+        }
+        x := self.x + 6
+        if self.icon.length() > 0 {
+            if self._img == null and not self._img_failed {
+                try {
+                    self._img = win.load_image(self.icon)
+                } catch (err: window.WindowError) {
+                    self._img_failed = true
+                }
+            }
+            sz := self._icon_size(t)
+            iy := self.y + (self.height - sz) / 2
+            if self._img != null {
+                alpha := 255
+                if not self.enabled { alpha = 90 }
+                win.image(self._img, x, iy, width=sz, height=sz, alpha=alpha)
+            } else {
+                win.rect(x, iy, sz, sz, t.muted, fill=false)       // missing icon
+            }
+            x = x + sz + t.char_w() / 2
+        }
+        if self.text.length() > 0 {
+            win.text(self.text, x, self.y + (self.height - t.line()) / 2, _ink(self, t.text, t), scale=t.scale)
+        }
+        if self.focused { _focus_ring(win, self, t) }
+    }
+}
+
+---
+A row of `ui.ToolButton`s on a raised strip, usually under the menu bar.
+---
+struct Toolbar : Row {
+    define __init(self, buttons: List) -> void {
+        super().__init(buttons, 3, 2)
+    }
+
+    define draw(self, win: window.Window, t: Theme) -> void {
+        win.rect(self.x, self.y, self.width, self.height, t.surface)
+        win.rect(self.x, self.y + self.height - 1, self.width, 1, t.border)
+        for c in self._kids {
+            w: Widget = c
+            if w.visible { w.draw(win, t) }
+        }
+    }
+}
+
+---
+A strip of text sections along the bottom of a window:
+`ui.StatusBar(["Ready", "Ln 1, Col 1"])`. The first section takes the
+free space; the others are right-aligned. `set(i, text)` changes one.
+---
+struct StatusBar : Widget {
+    sections: List
+
+    define __init(self, sections: List) -> void {
+        super().__init()
+        self.sections = sections
+    }
+
+    --- Change section `i`'s text (adds sections as needed). ---
+    define set(self, i: Int, text: String) -> void {
+        while self.sections.length() <= i { self.sections.append("") }
+        self.sections[i] = text
+    }
+
+    --- Section `i`'s text ("" if there's none). ---
+    define get(self, i: Int) -> String {
+        if i < 0 or i >= self.sections.length() { return "" }
+        return self.sections[i].str()
+    }
+
+    define measure(self, t: Theme) -> void {
+        w := 0
+        for sct in self.sections { w = w + window.text_width(sct.str(), t.scale) + 3 * t.char_w() }
+        self.min_w = w
+        self.min_h = t.line() + 8
+    }
+
+    define draw(self, win: window.Window, t: Theme) -> void {
+        win.rect(self.x, self.y, self.width, self.height, t.surface)
+        win.rect(self.x, self.y, self.width, 1, t.border)
+        ty := self.y + (self.height - t.line()) / 2
+        if self.sections.length() == 0 { return }
+        win.text(self.get(0), self.x + t.char_w(), ty, t.muted, scale=t.scale)
+        rx := self.x + self.width - t.char_w()
+        i := self.sections.length() - 1
+        while i >= 1 {
+            text := self.get(i)
+            tw := window.text_width(text, t.scale)
+            rx = rx - tw
+            win.text(text, rx, ty, t.muted, scale=t.scale)
+            rx = rx - t.char_w()
+            win.rect(rx, self.y + 4, 1, self.height - 8, t.border)
+            rx = rx - t.char_w()
+            i = i - 1
+        }
+    }
+}
+
+// ===== DatePicker =====
+
+define _leap(y: Int) -> Bool {
+    return (y % 4 == 0 and y % 100 != 0) or y % 400 == 0
+}
+
+--- Days in `month` (1-12) of `year`. ---
+define days_in_month(year: Int, month: Int) -> Int {
+    if month == 2 {
+        if _leap(year) { return 29 }
+        return 28
+    }
+    if month == 4 or month == 6 or month == 9 or month == 11 { return 30 }
+    return 31
+}
+
+--- Day of the week of a date: 0 = Monday ... 6 = Sunday. ---
+define weekday(year: Int, month: Int, day: Int) -> Int {
+    // Sakamoto's method (0 = Sunday), shifted so the week starts on Monday.
+    offsets := [0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4]
+    y := year
+    if month < 3 { y = y - 1 }
+    o: Int = offsets[month - 1]
+    sun0 := (y + y / 4 - y / 100 + y / 400 + o + day) % 7
+    return (sun0 + 6) % 7
+}
+
+define _two(n: Int) -> String {
+    if n < 10 { return "0" + n.str() }
+    return n.str()
+}
+
+_MONTHS := ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"]
+
+---
+A date field that opens a month calendar. `year`, `month` (1-12), `day`;
+`text()` is "YYYY-MM-DD". Click the field (or Space / Enter / Alt+Down) to
+open it; in the calendar click a day, `<` / `>` change month, arrows move
+by day / week, Page Up / Page Down by month, Enter picks, Escape closes.
+`on_change(year, month, day)` runs when the date changes.
+---
+struct DatePicker : Widget {
+    year: Int
+    month: Int
+    day: Int
+    on_change: Callable
+    is_open: Bool
+    _vy: Int
+    _vm: Int
+    _cursor: Int
+    _px: Int
+    _py: Int
+    _pw: Int
+    _ph: Int
+    _cell: Int
+
+    define __init(self, year: Int = 2026, month: Int = 1, day: Int = 1, on_change: Callable = null) -> void {
+        super().__init()
+        self.year = year
+        self.month = _clamp(month, 1, 12)
+        self.day = _clamp(day, 1, days_in_month(year, self.month))
+        self.on_change = on_change
+        self.is_open = false
+        self._vy = self.year
+        self._vm = self.month
+        self._cursor = self.day
+        self._px = 0
+        self._py = 0
+        self._pw = 0
+        self._ph = 0
+        self._cell = 28
+        self.focusable = true
+    }
+
+    --- The date as "YYYY-MM-DD". ---
+    define text(self) -> String {
+        return self.year.str() + "-" + _two(self.month) + "-" + _two(self.day)
+    }
+
+    --- Set the date (clamped to a real date); runs `on_change` if it changed. ---
+    define set_date(self, year: Int, month: Int, day: Int) -> void {
+        m := _clamp(month, 1, 12)
+        d := _clamp(day, 1, days_in_month(year, m))
+        if year == self.year and m == self.month and d == self.day { return }
+        self.year = year
+        self.month = m
+        self.day = d
+        if self.on_change != null { self.on_change(year, m, d) }
+    }
+
+    --- Show the calendar (on the chosen date's month). ---
+    define open(self) -> void {
+        if self.is_open or not self.enabled { return }
+        self._vy = self.year
+        self._vm = self.month
+        self._cursor = self.day
+        self.is_open = true
+        _popups.append(self)
+    }
+
+    --- Hide the calendar. ---
+    define close(self) -> void {
+        if not self.is_open { return }
+        self.is_open = false
+        keep := []
+        for o in _popups {
+            w: Widget = o
+            if w != self { keep.append(w) }
+        }
+        _popups.clear()
+        for w in keep { _popups.append(w) }
+    }
+
+    define close_popup(self) -> void {
+        self.close()
+    }
+
+    // Move the shown month by `by` months (cursor clamped to it).
+    define _shift_month(self, by: Int) -> void {
+        idx := self._vy * 12 + (self._vm - 1) + by
+        self._vy = idx / 12
+        self._vm = idx % 12 + 1
+        self._cursor = _clamp(self._cursor, 1, days_in_month(self._vy, self._vm))
+    }
+
+    // Move the cursor by `by` days, across months.
+    define _shift_day(self, by: Int) -> void {
+        d := self._cursor + by
+        while d < 1 {
+            self._shift_month(-1)
+            d = d + days_in_month(self._vy, self._vm)
+        }
+        while d > days_in_month(self._vy, self._vm) {
+            d = d - days_in_month(self._vy, self._vm)
+            self._shift_month(1)
+        }
+        self._cursor = d
+    }
+
+    define measure(self, t: Theme) -> void {
+        self.min_w = window.text_width("0000-00-00", t.scale) + 16 + 3 * t.char_w()
+        self.min_h = t.line() + 12
+    }
+
+    define handle(self, e: window.Event) -> Bool {
+        if not self.enabled { return false }
+        if e.kind == "mouse_down" and e.button == 1 {
+            if self.is_open { self.close() } else { self.open() }
+            return true
+        }
+        if e.kind == "mouse_up" { return true }
+        if e.kind == "key_down" and not self.is_open {
+            if e.key == "space" or e.key == "return" or (e.key == "down" and e.alt) {
+                self.open()
+                return true
+            }
+        }
+        return false
+    }
+
+    define popup_contains(self, px: Int, py: Int) -> Bool {
+        return px >= self._px and py >= self._py and px < self._px + self._pw and py < self._py + self._ph
+    }
+
+    // The day under (px, py) in the shown month, or 0.
+    define _day_at(self, px: Int, py: Int) -> Int {
+        c := self._cell
+        gx := (px - self._px - 6) / c
+        gy := (py - self._py - 6 - 2 * c) / c
+        if px < self._px + 6 or py < self._py + 6 + 2 * c or gx < 0 or gx > 6 { return 0 }
+        d := gy * 7 + gx - weekday(self._vy, self._vm, 1) + 1
+        if d < 1 or d > days_in_month(self._vy, self._vm) { return 0 }
+        return d
+    }
+
+    define popup_handle(self, e: window.Event) -> Bool {
+        if e.kind == "mouse_down" and e.button == 1 {
+            c := self._cell
+            if e.y < self._py + 6 + c {
+                if e.x < self._px + 6 + c { self._shift_month(-1) }
+                elif e.x >= self._px + self._pw - 6 - c { self._shift_month(1) }
+                return true
+            }
+            d := self._day_at(e.x, e.y)
+            if d > 0 {
+                self.set_date(self._vy, self._vm, d)
+                self.close()
+            }
+            return true
+        }
+        if e.kind == "mouse_move" {
+            d := self._day_at(e.x, e.y)
+            if d > 0 { self._cursor = d }
+            return true
+        }
+        return true
+    }
+
+    define popup_key(self, e: window.Event) -> Bool {
+        if e.kind != "key_down" { return e.kind == "key_up" or e.kind == "text" }
+        k := e.key
+        if k == "left" { self._shift_day(-1) }
+        elif k == "right" { self._shift_day(1) }
+        elif k == "up" { self._shift_day(-7) }
+        elif k == "down" { self._shift_day(7) }
+        elif k == "pageup" { self._shift_month(-1) }
+        elif k == "pagedown" { self._shift_month(1) }
+        elif k == "home" { self._cursor = 1 }
+        elif k == "end" { self._cursor = days_in_month(self._vy, self._vm) }
+        elif k == "return" or k == "keypad_enter" or k == "space" {
+            self.set_date(self._vy, self._vm, self._cursor)
+            self.close()
+        } elif k == "escape" or k == "tab" {
+            self.close()
+        }
+        return true
+    }
+
+    define draw(self, win: window.Window, t: Theme) -> void {
+        win.rect(self.x, self.y, self.width, self.height, t.input)
+        border := t.border
+        if self.focused or self.is_open { border = t.accent }
+        win.rect(self.x, self.y, self.width, self.height, border, fill=false)
+        win.text(self.text(), self.x + 8, self.y + (self.height - t.line()) / 2, _ink(self, t.text, t), scale=t.scale)
+        // A small calendar glyph on the right.
+        gx := self.x + self.width - 8 - 2 * t.char_w()
+        gy := self.y + (self.height - t.line()) / 2 + 2
+        gs := t.line() - 4
+        win.rect(gx, gy, gs, gs, _ink(self, t.muted, t), fill=false)
+        win.rect(gx, gy, gs, 3, _ink(self, t.muted, t))
+    }
+
+    define draw_popup(self, win: window.Window, t: Theme) -> void {
+        c := _max(t.line() + 8, 3 * t.char_w() + 6)
+        self._cell = c
+        self._pw = 7 * c + 12
+        self._ph = 8 * c + 12
+        self._px = self.x
+        self._py = self.y + self.height + 2
+        if self._px + self._pw > win.width() { self._px = _max(0, win.width() - self._pw) }
+        if self._py + self._ph > win.height() and self.y - self._ph - 2 >= 0 { self._py = self.y - self._ph - 2 }
+        // Neither fits: keep it inside the window.
+        self._py = _clamp(self._py, 0, _max(0, win.height() - self._ph))
+        x := self._px
+        y := self._py
+        win.rect(x + 3, y + 3, self._pw, self._ph, mix(t.background, window.black(), 45))
+        win.rect(x, y, self._pw, self._ph, t.surface)
+        win.rect(x, y, self._pw, self._ph, t.border, fill=false)
+        // Header: < Month Year >
+        hy := y + 6 + (c - t.line()) / 2
+        win.text("<", x + 6 + (c - t.char_w()) / 2, hy, t.text, scale=t.scale)
+        win.text(">", x + self._pw - 6 - c + (c - t.char_w()) / 2, hy, t.text, scale=t.scale)
+        title := _MONTHS[self._vm - 1].str() + " " + self._vy.str()
+        win.text(title, x + (self._pw - window.text_width(title, t.scale)) / 2, hy, t.text, scale=t.scale)
+        // Weekday names.
+        names := ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"]
+        i := 0
+        while i < 7 {
+            wd: String = names[i]
+            win.text(wd, x + 6 + i * c + (c - window.text_width(wd, t.scale)) / 2, y + 6 + c + (c - t.line()) / 2, t.muted, scale=t.scale)
+            i = i + 1
+        }
+        // Days.
+        first := weekday(self._vy, self._vm, 1)
+        count := days_in_month(self._vy, self._vm)
+        d := 1
+        while d <= count {
+            cell := first + d - 1
+            cx := x + 6 + (cell % 7) * c
+            cy := y + 6 + 2 * c + (cell / 7) * c
+            ink := t.text
+            chosen := d == self.day and self._vm == self.month and self._vy == self.year
+            if chosen {
+                win.rect(cx + 1, cy + 1, c - 2, c - 2, t.accent)
+                ink = t.accent_text
+            }
+            if d == self._cursor { win.rect(cx + 1, cy + 1, c - 2, c - 2, t.focus, fill=false) }
+            label := d.str()
+            win.text(label, cx + (c - window.text_width(label, t.scale)) / 2, cy + (c - t.line()) / 2, ink, scale=t.scale)
+            d = d + 1
+        }
+    }
+}
+
 // ===== ColorPicker =====
 
 // HSV (hue 0-359, saturation / value 0-100) <-> colour, in whole numbers.
@@ -3253,6 +3852,32 @@ struct MenuItem {
     define is_separator(self) -> Bool {
         return self.text == "-"
     }
+
+    --- True when key event `e` is this item's `shortcut` ("Ctrl+S", "Ctrl+Shift+N", "F5", "Delete"; Ctrl also matches Cmd). ---
+    define matches(self, e: window.Event) -> Bool {
+        if self.shortcut.length() == 0 or e.kind != "key_down" { return false }
+        parts := self.shortcut.split("+")
+        ctrl := false
+        shift := false
+        alt := false
+        key := ""
+        for p in parts {
+            word: String = p
+            w := word.trim().lower()
+            if w == "ctrl" or w == "cmd" or w == "control" { ctrl = true }
+            elif w == "shift" { shift = true }
+            elif w == "alt" or w == "option" { alt = true }
+            elif w == "del" { key = "delete" }
+            elif w == "esc" { key = "escape" }
+            elif w == "enter" { key = "return" }
+            elif w == "pgup" { key = "pageup" }
+            elif w == "pgdn" { key = "pagedown" }
+            elif w == "ins" { key = "insert" }
+            else { key = w }
+        }
+        if key.length() == 0 { return false }
+        return e.key == key and (e.ctrl or e.meta) == ctrl and e.shift == shift and e.alt == alt
+    }
 }
 
 ---
@@ -3477,6 +4102,10 @@ struct MenuBar : Widget {
             mm: Menu = m
             mm.bar = self
         }
+    }
+
+    define is_menu_bar(self) -> Bool {
+        return true
     }
 
     define measure(self, t: Theme) -> void {
@@ -3862,6 +4491,22 @@ struct FileDialog : Widget {
     }
 }
 
+// Every visible MenuBar in the tree.
+define _all_menu_bars(w: Widget) -> List {
+    out := []
+    _collect_bars(w, out)
+    return out
+}
+
+define _collect_bars(w: Widget, out: List) -> void {
+    if not w.visible { return }
+    if w.is_menu_bar() { out.append(w) }
+    for c in w.children() {
+        cw: Widget = c
+        _collect_bars(cw, out)
+    }
+}
+
 // Names sorted, ignoring case (insertion sort; folders are small).
 define _sorted_names(names: List) -> List {
     out := []
@@ -4006,6 +4651,37 @@ struct App {
     --- True while something is being dragged (see `Widget.on_drag`). ---
     define dragging(self) -> Bool {
         return self._dragging
+    }
+
+    // Menus whose shortcuts apply now.
+    define _shortcut_menus(self, w: Widget, out: List) -> void {
+        if not w.visible or not w.enabled { return }
+        if w.context_menu != null and _focused_in(w) != null { out.append(w.context_menu) }
+        for c in w.children() {
+            cw: Widget = c
+            self._shortcut_menus(cw, out)
+        }
+    }
+
+    // Run the enabled menu item whose shortcut is `e`; true if one did.
+    define _run_shortcut(self, e: window.Event) -> Bool {
+        menus := []
+        self._shortcut_menus(self.root, menus)
+        for b in _all_menu_bars(self.root) {
+            bar: MenuBar = b
+            for m in bar.menus { menus.append(m) }
+        }
+        for mm in menus {
+            menu: Menu = mm
+            for it in menu.items {
+                item: MenuItem = it
+                if item.enabled and not item.is_separator() and item.matches(e) {
+                    if item.on_click != null { item.on_click() }
+                    return true
+                }
+            }
+        }
+        return false
     }
 
     // The innermost widget at (px, py) that something can be dropped on.
@@ -4219,6 +4895,9 @@ struct App {
             return
         }
         if k == "key_down" and self.on_key != null { self.on_key(e) }
+        // Menu shortcuts: from any menu bar, and the right-click menus of the
+        // focused widget and those around it. Not while a popup is open.
+        if k == "key_down" and _popups.length() == 0 and self._run_shortcut(e) { return }
         // An open popup that takes keys (a menu) gets them first.
         if (k == "key_down" or k == "key_up" or k == "text") and _popups.length() > 0 {
             top: Widget = _popups[_popups.length() - 1]

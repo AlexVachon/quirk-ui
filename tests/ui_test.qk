@@ -1,4 +1,4 @@
-// ui v1.4.0, headless: layout, events routed by App.dispatch, widget
+// ui v1.5.0, headless: layout, events routed by App.dispatch, widget
 // state and drawing. Every test is skipped (passes) without SDL2.
 use window
 use ui
@@ -1121,5 +1121,157 @@ define test_list_view_reorder() -> void {
     mouse(app, "mouse_move", lv.x + 10, lv.y + 2 + rh * 3 + 10)
     mouse(app, "mouse_up", lv.x + 10, lv.y + 2 + rh * 3 + 10)
     test.assert_eq(lv.items, ["d", "b", "c", "a"])
+    app.close()
+}
+
+// ───── v1.5.0: shortcuts, SplitView, Toolbar, StatusBar, DatePicker ─────
+define test_menu_shortcuts_work() -> void {
+    if not window.available() { return }
+    app := new_app()
+    log := []
+    file := ui.Menu([
+        ui.MenuItem("Save", on_click=fn() { log.append("save") }, shortcut="Ctrl+S"),
+        ui.MenuItem("Save as", on_click=fn() { log.append("save-as") }, shortcut="Ctrl+Shift+S"),
+        ui.MenuItem("Off", on_click=fn() { log.append("off") }, shortcut="F5", enabled=false),
+    ])
+    field := ui.TextInput("text")
+    field.context_menu = ui.Menu([ui.MenuItem("Clear", on_click=fn() { log.append("clear") }, shortcut="Del")])
+    other := ui.Button("other")
+    app.root = ui.Column([ui.MenuBar(["File"], [file]), field, other], padding=4)
+    app.layout()
+    keym(app, "s", ctrl=true)
+    keym(app, "s", ctrl=true, shift=true)
+    test.assert_eq(log, ["save", "save-as"])
+    e := ev("key_down")
+    e.key = "s"
+    e.meta = true                                  // Cmd+S on macOS
+    app.dispatch(e)
+    test.assert_eq(log.length(), 3)
+    keym(app, "f5")                                // disabled: nothing
+    test.assert_eq(log.length(), 3)
+    // A context menu's shortcut only while its widget has the focus.
+    click_on(app, other)
+    keym(app, "delete")
+    test.assert_eq(log.length(), 3)
+    click_on(app, field)
+    keym(app, "delete")
+    test.assert_eq(log[3], "clear")
+    test.assert_eq(field.text, "text")            // the shortcut took the key
+    test.assert_true(ui.MenuItem("x", shortcut="Ctrl+Shift+N").matches(keyev("n", true, true)))
+    test.assert_false(ui.MenuItem("x", shortcut="Ctrl+N").matches(keyev("n", true, true)))
+    app.close()
+}
+
+define keyev(k: String, ctrl: Bool, shift: Bool) -> window.Event {
+    e := ev("key_down")
+    e.key = k
+    e.ctrl = ctrl
+    e.shift = shift
+    return e
+}
+
+define test_split_view() -> void {
+    if not window.available() { return }
+    app := new_app()
+    left := ui.Label("left")
+    right := ui.Label("right")
+    split := ui.SplitView(left, right, ratio=25)
+    app.root = ui.Column([split])
+    app.layout()
+    test.assert_eq(split.width, 400)
+    test.assert_eq(left.width, (400 - 6) * 25 / 100)
+    test.assert_eq(right.x, left.width + 6)
+    // Drag the divider to the middle.
+    bx := left.width + 3
+    mouse(app, "mouse_down", bx, 100)
+    mouse(app, "mouse_move", 200, 100)
+    mouse(app, "mouse_up", 200, 100)
+    app.layout()
+    test.assert_true(split.ratio >= 49 and split.ratio <= 51)
+    // It never gets smaller than min_size.
+    mouse(app, "mouse_down", left.width + 3, 100)
+    mouse(app, "mouse_move", 2, 100)
+    mouse(app, "mouse_up", 2, 100)
+    app.layout()
+    test.assert_eq(left.width, 40)
+    // Stacked.
+    top := ui.Label("top")
+    bottom := ui.Label("bottom")
+    app.root = ui.Column([ui.SplitView(top, bottom, vertical=true, ratio=50)])
+    app.layout()
+    test.assert_eq(top.height, (300 - 6) / 2)
+    test.assert_eq(bottom.y, top.height + 6)
+    app.close()
+}
+
+define test_toolbar_and_status_bar() -> void {
+    if not window.available() { return }
+    app := new_app()
+    saves := 0
+    save := ui.ToolButton("Save", on_click=fn() { saves = saves + 1 }, tooltip="Save the file")
+    icon_only := ui.ToolButton(icon="no/such/icon.png", tooltip="missing icon")
+    tools := ui.Toolbar([save, ui.ToolButton("-"), icon_only])
+    status := ui.StatusBar(["Ready", "Ln 1"])
+    app.root = ui.Column([tools, ui.Spacer(), status], spacing=0)
+    app.layout()
+    test.assert_eq(status.y + status.height, 300)
+    click_on(app, save)
+    test.assert_eq(saves, 1)
+    test.assert_eq(save.tooltip, "Save the file")
+    app.draw()                                     // a missing icon draws a box, no error
+    test.assert_true(icon_only._img_failed)
+    status.set(1, "Ln 7")
+    status.set(3, "UTF-8")
+    test.assert_eq(status.get(1), "Ln 7")
+    test.assert_eq(status.sections.length(), 4)
+    app.draw()
+    app.close()
+}
+
+define test_date_picker() -> void {
+    if not window.available() { return }
+    test.assert_eq(ui.days_in_month(2024, 2), 29)
+    test.assert_eq(ui.days_in_month(2026, 2), 28)
+    test.assert_eq(ui.days_in_month(2026, 11), 30)
+    test.assert_eq(ui.weekday(2026, 11, 13), 4)    // a Friday
+    test.assert_eq(ui.weekday(2000, 1, 1), 5)      // a Saturday
+    app := new_app()
+    got := []
+    dp := ui.DatePicker(2026, 1, 31, on_change=fn(y, m, d) { got.append(d) })
+    app.root = ui.Column([dp, ui.Spacer()], padding=10)
+    app.layout()
+    test.assert_eq(dp.text(), "2026-01-31")
+    click_on(app, dp)
+    test.assert_true(dp.is_open)
+    keym(app, "right")                             // Feb 1
+    keym(app, "return")
+    test.assert_eq(dp.text(), "2026-02-01")
+    test.assert_false(dp.is_open)
+    // Page Down then Escape: nothing changes.
+    keym(app, "space")
+    keym(app, "pagedown")
+    keym(app, "escape")
+    test.assert_eq(dp.text(), "2026-02-01")
+    // Click a day: open, draw (places the grid), click the 14th.
+    click_on(app, dp)
+    app.draw()
+    first := ui.weekday(2026, 2, 1)
+    cell := first + 13
+    c := dp._cell
+    cx := dp._px + 6 + (cell % 7) * c + c / 2
+    cy := dp._py + 6 + 2 * c + (cell / 7) * c + c / 2
+    click(app, cx, cy)
+    test.assert_eq(dp.text(), "2026-02-14")
+    // The ">" arrow moves to March without picking.
+    click_on(app, dp)
+    app.draw()
+    click(app, dp._px + dp._pw - 10, dp._py + 10)
+    test.assert_eq(dp._vm, 3)
+    test.assert_eq(dp.text(), "2026-02-14")
+    keym(app, "escape")
+    // set_date clamps to a real date.
+    dp.set_date(2026, 2, 31)
+    test.assert_eq(dp.text(), "2026-02-28")
+    test.assert_eq(got, [1, 14, 28])
     app.close()
 }
