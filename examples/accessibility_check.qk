@@ -1,0 +1,58 @@
+// Screen-reader check for ui (Windows: NVDA or Narrator).
+// Run (Windows):  set QUIRK_ACCESSIBILITY=1  then  quirk run accessibility_check.qk
+// and Tab through the window with NVDA or Narrator running.
+// Each widget prints what it did, so you can compare with what's spoken.
+use window
+use ui
+
+status := ui.StatusBar(["Ready"])
+
+define say(app: ui.App, msg: String) -> void {
+    print(msg)
+    status.sections = [msg]
+    app.announce(msg)
+}
+
+app := ui.App("Accessibility check", 520, 560)
+name := ui.TextInput(placeholder="Your name")
+notes := ui.TextArea("", rows=3)
+agree := ui.Checkbox("I agree", on_change=fn(v) { print("checkbox: " + String(v)) })
+volume := ui.Slider(0, 10, value=5, on_change=fn(v) { print("slider: " + String(v)) })
+size := ui.RadioGroup(["Small", "Medium", "Large"], selected=1, on_change=fn(i) { print("radio: " + String(i)) })
+colour := ui.Dropdown(["Red", "Green", "Blue"], on_change=fn(i, item) { print("dropdown: " + String(item)) })
+files := ui.ListView(["notes.txt", "photo.png", "report.pdf"], rows=3,
+                     on_select=fn(i, item) { print("list: " + String(item)) })
+tree := ui.TreeView([ui.TreeNode("Documents", [ui.TreeNode("Letters"), ui.TreeNode("Invoices")]),
+                     ui.TreeNode("Music")], rows=4)
+tabs := ui.Tabs(["General", "Advanced"], [ui.Label("General settings"), ui.Label("Advanced settings")])
+settings := ui.Button("*", on_click=fn() { say(app, "Settings opened") })
+settings.accessible_name = "Settings"
+save := ui.Button("Save", on_click=fn() { say(app, "Saved, " + name.text) })
+
+file_menu := ui.Menu([ui.MenuItem("New", on_click=fn() { say(app, "New") }, shortcut="Ctrl+N"),
+                      ui.MenuItem("-"),
+                      ui.MenuItem("Quit", on_click=fn() { app.close() })])
+
+app.root = ui.Column([
+    ui.MenuBar(["File"], [file_menu]),
+    ui.Row([ui.Label("Name"), name]),
+    ui.Row([ui.Label("Notes"), notes]),
+    agree,
+    ui.Row([ui.Label("Volume"), volume]),
+    ui.Row([ui.Label("Size"), size]),
+    ui.Row([ui.Label("Colour"), colour]),
+    ui.Row([ui.Label("Files"), files]),
+    ui.Row([ui.Label("Folders"), tree]),
+    tabs,
+    ui.Row([save, settings]),
+    status,
+], padding=10, spacing=6)
+
+// Also print what assistive technology is told, as it happens.
+app.on_access = fn(e) {
+    ev: ui.AccessEvent = e
+    print("[a11y] " + ev.kind + ": " + ev.node.describe())
+}
+
+print(app.accessibility().dump())
+app.run()

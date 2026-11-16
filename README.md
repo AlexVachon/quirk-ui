@@ -179,8 +179,11 @@ app.on_access = fn(e) { print(e.kind + ": " + e.node.describe()) }   // "focus" 
 app.announce("Saved")
 ```
 
-This is the platform-neutral half: connecting it to the system screen
-readers (Windows UI Automation first) comes next.
+On Windows the tree reaches screen readers (NVDA, Narrator, JAWS)
+through UI Automation: they read names, values and states, follow focus,
+and can press buttons, toggle checkboxes, set fields and sliders, and
+select list / tab / tree items. Experimental for now — set
+`QUIRK_ACCESSIBILITY=1` to turn it on. macOS and Linux are next.
 
 ## Requirements
 

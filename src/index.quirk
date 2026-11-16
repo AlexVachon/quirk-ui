@@ -77,6 +77,9 @@ from typing.collections.list use { List }
 use window
 use fs
 
+// Ids for the accessibility tree (Widget.access_id, App item ids).
+_a11y_counter := [0]
+
 define _max(a: Int, b: Int) -> Int {
     if a > b { return a }
     return b
@@ -232,6 +235,7 @@ struct Widget {
     accessible_name: String
     accessible_description: String
     _a11y_label: String
+    _a11y_id: Int
 
     define __init(self) -> void {
         self.x = 0
@@ -255,6 +259,7 @@ struct Widget {
         self.accessible_name = ""
         self.accessible_description = ""
         self._a11y_label = ""
+        self._a11y_id = 0
     }
 
     --- Work out `min_w` / `min_h` (containers measure their children first). ---
@@ -373,12 +378,37 @@ struct Widget {
         if n.description == "" { n.description = self._a11y_description() }
         n.states = self.access_states()
         n.widget = self
+        n.id = self.access_id()
         n.children = kids
         return n
     }
 
     define _a11y_description(self) -> String {
         return ""
+    }
+
+    --- A number identifying the widget to assistive technology, the same for its whole life. ---
+    define access_id(self) -> Int {
+        if self._a11y_id == 0 {
+            _a11y_counter[0] = _a11y_counter[0] + 1
+            self._a11y_id = _a11y_counter[0]
+        }
+        return self._a11y_id
+    }
+
+    ---
+    Do what a screen reader asks: `action` is "invoke", "toggle",
+    "set_value" / "set_range" (`value`), "select", "expand" or "collapse",
+    on this widget or one of its items (`node.index`, `node.data`). True if
+    it did something.
+    ---
+    define access_action(self, action: String, value: String, node: AccessNode) -> Bool {
+        return false
+    }
+
+    // [min, max, value] for sliders and progress bars; [] otherwise.
+    define _a11y_range(self) -> List {
+        return []
     }
 
     --- True if (px, py) is inside the widget's box. ---
@@ -722,6 +752,12 @@ when it has the focus and Enter / Space is pressed.
 struct Button : Widget {
     text: String
     on_click: Callable
+    define access_action(self, action: String, value: String, node: AccessNode) -> Bool {
+        if action != "invoke" or not self.enabled { return false }
+        self.click()
+        return true
+    }
+
     define access_role(self) -> String {
         return "button"
     }
@@ -795,6 +831,12 @@ struct Checkbox : Widget {
     text: String
     checked: Bool
     on_change: Callable
+    define access_action(self, action: String, value: String, node: AccessNode) -> Bool {
+        if (action != "toggle" and action != "invoke") or not self.enabled { return false }
+        self.toggle()
+        return true
+    }
+
     define access_role(self) -> String {
         return "checkbox"
     }
@@ -898,6 +940,16 @@ struct TextEdit : Widget {
     _compose: String
     _compose_cursor: Int
     _compose_len: Int
+    define access_action(self, action: String, value: String, node: AccessNode) -> Bool {
+        if action != "set_value" or not self.enabled { return false }
+        self._snapshot(false)
+        self.text = self.single_line ? value.replace("\n", " ") : value
+        self.cursor = self.text.length()
+        self.anchor = self.cursor
+        self._changed()
+        return true
+    }
+
     define access_role(self) -> String {
         return "textbox"
     }
@@ -1806,6 +1858,16 @@ struct Slider : Widget {
     value: Int
     step: Int
     on_change: Callable
+    define _a11y_range(self) -> List {
+        return [self.min, self.max, self.value]
+    }
+
+    define access_action(self, action: String, value: String, node: AccessNode) -> Bool {
+        if (action != "set_range" and action != "set_value") or not self.enabled { return false }
+        self.set(Int(value))
+        return true
+    }
+
     define access_role(self) -> String {
         return "slider"
     }
@@ -1912,6 +1974,12 @@ struct RadioGroup : Widget {
     selected: Int
     on_change: Callable
     _row_h: Int
+    define access_action(self, action: String, value: String, node: AccessNode) -> Bool {
+        if action != "select" or node.index < 0 or not self.enabled { return false }
+        self.select(node.index)
+        return true
+    }
+
     define access_role(self) -> String {
         return "radiogroup"
     }
@@ -1927,7 +1995,7 @@ struct RadioGroup : Widget {
         i := 0
         while i < n {
             h := n > 0 ? self.height / n : 0
-            item := AccessNode("radio", String(self.options[i]), "", self.x, self.y + i * h, self.width, h)
+            item := AccessNode("radio", String(self.options[i]), "", self.x, self.y + i * h, self.width, h)._item(self, i)
             if i == self.selected { item.states.append("checked") }
             out.append(item)
             i = i + 1
@@ -2029,6 +2097,10 @@ struct ProgressBar : Widget {
     value: Int
     max: Int
     show_text: Bool
+    define _a11y_range(self) -> List {
+        return [0, self.max, self.value]
+    }
+
     define access_role(self) -> String {
         return "progressbar"
     }
@@ -2146,6 +2218,12 @@ struct ListView : Widget {
     _top: Int
     _press: Int
     _drop: Int
+    define access_action(self, action: String, value: String, node: AccessNode) -> Bool {
+        if action != "select" or node.index < 0 or not self.enabled { return false }
+        self.select(node.index)
+        return true
+    }
+
     define access_role(self) -> String {
         return "list"
     }
@@ -2159,7 +2237,7 @@ struct ListView : Widget {
         out := []
         i := 0
         while i < self.items.length() {
-            item := AccessNode("listitem", _entry_text(self.items[i]), "", self.x, self.y, self.width, 0)
+            item := AccessNode("listitem", _entry_text(self.items[i]), "", self.x, self.y, self.width, 0)._item(self, i)
             if i == self.selected { item.states.append("selected") }
             out.append(item)
             i = i + 1
@@ -2462,6 +2540,12 @@ struct ToolButton : Widget {
     on_click: Callable
     _img: window.Image
     _img_failed: Bool
+    define access_action(self, action: String, value: String, node: AccessNode) -> Bool {
+        if action != "invoke" or not self.enabled { return false }
+        self.click()
+        return true
+    }
+
     define access_role(self) -> String {
         return "button"
     }
@@ -2710,6 +2794,12 @@ struct DatePicker : Widget {
     _pw: Int
     _ph: Int
     _cell: Int
+    define access_action(self, action: String, value: String, node: AccessNode) -> Bool {
+        if not self.enabled { return false }
+        if action == "expand" { self.open() } elif action == "collapse" { self.close() } else { return false }
+        return true
+    }
+
     define access_role(self) -> String {
         return "combobox"
     }
@@ -3238,6 +3328,19 @@ struct TreeView : Widget {
     rows: Int
     _top: Int
     _ind: Int
+    define access_action(self, action: String, value: String, node: AccessNode) -> Bool {
+        if node.data == null or not self.enabled { return false }
+        tn: TreeNode = node.data
+        if action == "select" {
+            self.select(tn)
+        } elif (action == "expand" and not tn.expanded) or (action == "collapse" and tn.expanded) {
+            self.toggle(tn)
+        } else {
+            return false
+        }
+        return true
+    }
+
     define access_role(self) -> String {
         return "tree"
     }
@@ -3256,7 +3359,8 @@ struct TreeView : Widget {
         out := []
         for nd in nodes {
             tn: TreeNode = nd
-            item := AccessNode("treeitem", tn.text, "", self.x, self.y, self.width, 0)
+            item := AccessNode("treeitem", tn.text, "", self.x, self.y, self.width, 0)._item(self, -1)
+            item.data = tn
             item.level = level
             if tn.children.length() > 0 {
                 item.states.append(tn.expanded ? "expanded" : "collapsed")
@@ -3491,6 +3595,12 @@ struct Table : Widget {
     _editor: TextInput
     _edit_row: Int
     _edit_col: Int
+    define access_action(self, action: String, value: String, node: AccessNode) -> Bool {
+        if action != "select" or node.index < 0 or not self.enabled { return false }
+        self.select(node.index)
+        return true
+    }
+
     define access_role(self) -> String {
         return "table"
     }
@@ -3505,7 +3615,7 @@ struct Table : Widget {
         i := 0
         while i < self.rows.length() {
             cells: List = self.rows[i]
-            row := AccessNode("row", "", "", self.x, self.y, self.width, 0)
+            row := AccessNode("row", "", "", self.x, self.y, self.width, 0)._item(self, i)
             names := ""
             for cell in cells {
                 txt := _entry_text(cell)
@@ -4103,6 +4213,31 @@ struct Dropdown : Widget {
     _py: Int
     _pw: Int
     _ph: Int
+    define access_action(self, action: String, value: String, node: AccessNode) -> Bool {
+        if not self.enabled { return false }
+        if action == "select" and node.index >= 0 {
+            self.select(node.index)
+            self.close()
+        } elif action == "expand" {
+            self.open()
+        } elif action == "collapse" {
+            self.close()
+        } elif action == "set_value" {
+            i := 0
+            while i < self.options.length() {
+                if String(self.options[i]) == value {
+                    self.select(i)
+                    return true
+                }
+                i = i + 1
+            }
+            return false
+        } else {
+            return false
+        }
+        return true
+    }
+
     define access_role(self) -> String {
         return "combobox"
     }
@@ -4121,7 +4256,7 @@ struct Dropdown : Widget {
         if not self.is_open { return out }
         i := 0
         while i < self.options.length() {
-            item := AccessNode("option", String(self.options[i]))
+            item := AccessNode("option", String(self.options[i]))._item(self, i)
             if i == self.selected { item.states.append("selected") }
             out.append(item)
             i = i + 1
@@ -4349,6 +4484,12 @@ struct Tabs : Widget {
     on_change: Callable
     _tab_h: Int
     _xs: List
+    define access_action(self, action: String, value: String, node: AccessNode) -> Bool {
+        if action != "select" or node.index < 0 or not self.enabled { return false }
+        self.select(node.index)
+        return true
+    }
+
     define access_role(self) -> String {
         return "tablist"
     }
@@ -4363,7 +4504,7 @@ struct Tabs : Widget {
         out := []
         i := 0
         while i < self.titles.length() {
-            tab := AccessNode("tab", String(self.titles[i]))
+            tab := AccessNode("tab", String(self.titles[i]))._item(self, i)
             if i == self.selected { tab.states.append("selected") }
             out.append(tab)
             i = i + 1
@@ -4586,16 +4727,24 @@ struct Menu : Widget {
     _py: Int
     _pw: Int
     _ph: Int
+    define access_action(self, action: String, value: String, node: AccessNode) -> Bool {
+        if action != "invoke" or node.index < 0 { return false }
+        self.activate(node.index)
+        return true
+    }
+
     define access_role(self) -> String {
         return "menu"
     }
 
     define _a11y_children(self) -> List {
         out := []
+        k := -1
         for it in self.items {
             mi: MenuItem = it
+            k = k + 1
             if mi.is_separator() { continue }
-            node := AccessNode("menuitem", mi.text)
+            node := AccessNode("menuitem", mi.text)._item(self, k)
             node.description = mi.shortcut
             if not mi.enabled { node.states.append("disabled") }
             out.append(node)
@@ -4798,6 +4947,18 @@ struct MenuBar : Widget {
     menus: List
     _open: Int
     _xs: List
+    define access_action(self, action: String, value: String, node: AccessNode) -> Bool {
+        if node.index < 0 { return false }
+        if action == "expand" or action == "invoke" {
+            self.open_menu(node.index)
+        } elif action == "collapse" {
+            self.close_popup()
+        } else {
+            return false
+        }
+        return true
+    }
+
     define access_role(self) -> String {
         return "menubar"
     }
@@ -4806,7 +4967,7 @@ struct MenuBar : Widget {
         out := []
         i := 0
         while i < self.titles.length() {
-            node := AccessNode("menuitem", String(self.titles[i]))
+            node := AccessNode("menuitem", String(self.titles[i]))._item(self, i)
             if i < self.menus.length() {
                 m: Menu = self.menus[i]
                 node.states.append(m.is_open ? "expanded" : "collapsed")
@@ -5496,6 +5657,9 @@ struct AccessNode {
     level: Int
     children: List
     widget: Widget
+    id: Int
+    index: Int
+    data: Any
 
     define __init(self, role: String, name: String = "", value: String = "", x: Int = 0, y: Int = 0, width: Int = 0, height: Int = 0) -> void {
         self.role = role
@@ -5510,6 +5674,16 @@ struct AccessNode {
         self.level = 0
         self.children = []
         self.widget = null
+        self.id = 0
+        self.index = -1
+        self.data = null
+    }
+
+    // The widget's id; items get theirs from App (by parent and position).
+    define _item(self, owner: Widget, index: Int) -> AccessNode {
+        self.widget = owner
+        self.index = index
+        return self
     }
 
     --- True if `state` ("focused", "checked"...) is one of its states. ---
@@ -5622,6 +5796,9 @@ struct App {
     on_access: Callable
     _a11y_focus: Widget
     _a11y_key: String
+    _a11y_last: AccessNode
+    _a11y_ids: Map
+    _a11y_nodes: Map
 
     define __init(self, title: String, width: Int, height: Int, theme: Theme = null, resizable: Bool = true, headless: Bool = false) -> void {
         self.win = window.open(title, width, height, resizable=resizable, headless=headless)
@@ -5649,6 +5826,9 @@ struct App {
         self.on_access = null
         self._a11y_focus = null
         self._a11y_key = ""
+        self._a11y_last = null
+        self._a11y_ids = {}
+        self._a11y_nodes = {}
         _close_popups()
     }
 
@@ -5684,12 +5864,127 @@ struct App {
     ---
     define announce(self, message: String) -> void {
         if self.on_access != null { self.on_access(AccessEvent("announce", AccessNode("alert", message))) }
+        self.win.access_announce(message)
+    }
+
+    // Give every node an id (widgets have theirs; items get one per parent
+    // and position, kept across frames) and remember them by id.
+    define _a11y_number(self, node: AccessNode, parent_id: Int, pos: Int) -> void {
+        if node.id == 0 {
+            key := String(parent_id) + "/" + String(pos)
+            if self._a11y_ids.has(key) {
+                v: Int = self._a11y_ids[key]
+                node.id = v
+            } else {
+                _a11y_counter[0] = _a11y_counter[0] + 1
+                node.id = _a11y_counter[0]
+                self._a11y_ids[key] = node.id
+            }
+        }
+        self._a11y_nodes[String(node.id)] = node
+        i := 0
+        for c in node.children {
+            cn: AccessNode = c
+            self._a11y_number(cn, node.id, i)
+            i = i + 1
+        }
+    }
+
+    // The tree as the flat arrays Window.access_update takes.
+    define _a11y_flatten(self, node: AccessNode, parent: Int, out: List) -> void {
+        ids: List = out[0]
+        me := ids.length()
+        ids.append(node.id)
+        pl: List = out[1]
+        pl.append(parent)
+        rl: List = out[2]
+        rl.append(node.role)
+        nl: List = out[3]
+        nl.append(node.name)
+        vl: List = out[4]
+        vl.append(node.value)
+        dl: List = out[5]
+        dl.append(node.description)
+        bits := 0
+        for st in node.states {
+            s: String = st
+            if s == "focusable" { bits = bits + 1 }
+            elif s == "focused" { bits = bits + 2 }
+            elif s == "disabled" { bits = bits + 4 }
+            elif s == "checked" { bits = bits + 8 }
+            elif s == "selected" { bits = bits + 16 }
+            elif s == "expanded" { bits = bits + 32 }
+            elif s == "collapsed" { bits = bits + 64 }
+            elif s == "editable" { bits = bits + 128 }
+            elif s == "multiline" { bits = bits + 256 }
+        }
+        sl: List = out[6]
+        sl.append(bits)
+        bl: List = out[7]
+        bl.append(node.x)
+        bl.append(node.y)
+        bl.append(node.width)
+        bl.append(node.height)
+        ml: List = out[8]
+        ml.append(node.level)
+        rng := []
+        if node.widget != null and node.index < 0 { rng = node.widget._a11y_range() }
+        if rng.length() == 3 {
+            ml.append(rng[0])
+            ml.append(rng[1])
+            ml.append(rng[2])
+        } else {
+            ml.append(0)
+            ml.append(0)
+            ml.append(0)
+        }
+        for c in node.children {
+            cn: AccessNode = c
+            self._a11y_flatten(cn, me, out)
+        }
+    }
+
+    ---
+    The tree with ids (`AccessNode.id`), as last sent to a screen reader
+    — also what `access` events' targets refer to. Rebuilt on each call.
+    ---
+    define accessibility_with_ids(self) -> AccessNode {
+        tree := self.accessibility()
+        tree.id = -1
+        self._a11y_nodes = {}
+        self._a11y_number(tree, 0, 0)
+        return tree
+    }
+
+    // While a screen reader reads the window: send it the tree.
+    define _a11y_sync(self) -> void {
+        if not self.win.access_active() { return }
+        tree := self.accessibility_with_ids()
+        out := [[], [], [], [], [], [], [], [], []]
+        self._a11y_flatten(tree, -1, out)
+        self.win.access_update(out[0], out[1], out[2], out[3], out[4], out[5], out[6], out[7], out[8])
+    }
+
+    // A screen reader's request (an "access" event).
+    define _access_do(self, e: window.Event) -> void {
+        key := String(e.target)
+        if not self._a11y_nodes.has(key) { self.accessibility_with_ids() }
+        if not self._a11y_nodes.has(key) { return }
+        node: AccessNode = self._a11y_nodes[key]
+        w := node.widget
+        if w == null { return }
+        if e.action == "focus" {
+            if w.focusable and w.enabled { self.focus_on(w) }
+            return
+        }
+        w.access_action(e.action, e.text, node)
     }
 
     // After a frame: tell `on_access` when focus moved, or the focused
     // widget's name / value / states changed.
     define _a11y_check(self) -> void {
-        if self.on_access == null { return }
+        active := self.win.access_active()
+        if self.on_access == null and not active { return }
         f := self.focus
         if f == null {
             self._a11y_focus = null
@@ -5701,7 +5996,9 @@ struct App {
             self._a11y_focus = f
             if node == null { return }
             self._a11y_key = node.describe()
-            self.on_access(AccessEvent("focus", node))
+            self._a11y_last = node
+            if self.on_access != null { self.on_access(AccessEvent("focus", node)) }
+            if active { self.win.access_focus(node.id) }
             return
         }
         node := f.access_node()
@@ -5709,7 +6006,15 @@ struct App {
         k := node.describe()
         if k != self._a11y_key {
             self._a11y_key = k
-            self.on_access(AccessEvent("value", node))
+            if self.on_access != null { self.on_access(AccessEvent("value", node)) }
+            if active {
+                before := self._a11y_last
+                if before == null or before.value != node.value { self.win.access_changed(node.id, "value") }
+                if before == null or before.name != node.name { self.win.access_changed(node.id, "name") }
+                if before == null or before.has("checked") != node.has("checked") { self.win.access_changed(node.id, "checked") }
+                if before == null or before.has("expanded") != node.has("expanded") { self.win.access_changed(node.id, "expanded") }
+            }
+            self._a11y_last = node
         }
     }
 
@@ -5842,6 +6147,10 @@ struct App {
     --- Route one event to the widget it's for (also usable from tests). ---
     define dispatch(self, e: window.Event) -> void {
         k := e.kind
+        if k == "access" {
+            self._access_do(e)
+            return
+        }
         if k == "mouse_move" or k == "mouse_down" or k == "mouse_up" or k == "wheel" or k == "key_down" or k == "blur" {
             if k == "mouse_move" {
                 self._mx = e.x
@@ -6033,6 +6342,7 @@ struct App {
         self.layout()
         self.draw()
         self.win.present()
+        self._a11y_sync()
         self._a11y_check()
         return true
     }

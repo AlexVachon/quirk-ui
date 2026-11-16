@@ -1630,3 +1630,123 @@ define test_accessibility_menus_and_dropdowns() -> void {
     test.assert_true(tree.find("", "combobox").has("expanded"))
     app.close()
 }
+
+define access_do(app: ui.App, node: ui.AccessNode, action: String, text: String = "") -> void {
+    e := ev("access")
+    e.target = node.id
+    e.action = action
+    e.text = text
+    app.dispatch(e)
+}
+
+// Ids stay the same across rebuilds of the tree (widgets and items), and
+// are all different.
+define test_accessibility_ids_are_stable() -> void {
+    if not window.available() { return }
+    app := new_app()
+    lv := ui.ListView(["a", "b"], rows=2)
+    ok := ui.Button("OK")
+    app.root = ui.Column([lv, ok])
+    app.layout()
+    t1 := app.accessibility_with_ids()
+    t2 := app.accessibility_with_ids()
+    test.assert_eq(t1.find("OK", "button").id, t2.find("OK", "button").id)
+    test.assert_eq(t1.find("b", "listitem").id, t2.find("b", "listitem").id)
+    test.assert_true(t1.find("a", "listitem").id != t1.find("b", "listitem").id)
+    test.assert_true(t1.find("OK", "button").id > 0)
+    app.close()
+}
+
+// A screen reader's requests (access events) reach the widgets.
+define test_accessibility_actions() -> void {
+    if not window.available() { return }
+    app := new_app()
+    clicks := []
+    btn := ui.Button("Go", on_click=fn() { clicks.append("go") })
+    box := ui.Checkbox("Agree")
+    field := ui.TextInput()
+    slider := ui.Slider(0, 10, value=2)
+    lv := ui.ListView(["a", "b", "c"], rows=3)
+    tabs := ui.Tabs(["One", "Two"], [ui.Label("1"), ui.Label("2")])
+    tree := ui.TreeView([ui.TreeNode("root", [ui.TreeNode("leaf")])])
+    dd := ui.Dropdown(["S", "M", "L"])
+    app.root = ui.Column([btn, box, ui.Row([ui.Label("Name"), field]), slider, lv, tabs, tree, dd])
+    app.layout()
+    t := app.accessibility_with_ids()
+    access_do(app, t.find("Go", "button"), "invoke")
+    test.assert_eq(clicks, ["go"])
+    access_do(app, t.find("Agree", "checkbox"), "toggle")
+    test.assert_true(box.checked)
+    access_do(app, t.find("Name", "textbox"), "set_value", "Ada")
+    test.assert_eq(field.text, "Ada")
+    access_do(app, t.find("Name", "textbox"), "focus")
+    test.assert_true(field.focused)
+    access_do(app, t.find("", "slider"), "set_range", "7")
+    test.assert_eq(slider.value, 7)
+    access_do(app, t.find("c", "listitem"), "select")
+    test.assert_eq(lv.selected, 2)
+    access_do(app, t.find("Two", "tab"), "select")
+    test.assert_eq(tabs.selected, 1)
+    access_do(app, t.find("root", "treeitem"), "expand")
+    t = app.accessibility_with_ids()
+    test.assert_true(t.find("leaf", "treeitem") != null)
+    access_do(app, t.find("", "combobox"), "set_value", "L")
+    test.assert_eq(dd.selected, 2)
+    // A target that no longer exists is ignored.
+    gone := ev("access")
+    gone.target = 999999
+    gone.action = "invoke"
+    app.dispatch(gone)
+    test.assert_eq(clicks, ["go"])
+    app.close()
+}
+
+define position_of(xs: List, want: String) -> Int {
+    i := 0
+    while i < xs.length() {
+        v: String = xs[i]
+        if v == want { return i }
+        i = i + 1
+    }
+    return -1
+}
+
+// The flat form sent to the screen-reader bridge: parallel arrays,
+// parents before children, node 0 the window.
+define test_accessibility_flat_export() -> void {
+    if not window.available() { return }
+    app := new_app()
+    app.root = ui.Column([ui.Checkbox("A", checked=true), ui.Slider(0, 10, value=3), ui.ListView(["x", "y"], rows=2)])
+    app.layout()
+    out := [[], [], [], [], [], [], [], [], []]
+    app._a11y_flatten(app.accessibility_with_ids(), -1, out)
+    ids: List = out[0]
+    parents: List = out[1]
+    roles: List = out[2]
+    states: List = out[6]
+    boxes: List = out[7]
+    nums: List = out[8]
+    n := ids.length()
+    test.assert_true(n >= 6)
+    test.assert_eq(parents.length(), n)
+    test.assert_eq(boxes.length(), 4 * n)
+    test.assert_eq(nums.length(), 4 * n)
+    p0: Int = parents[0]
+    test.assert_eq(p0, -1)
+    test.assert_eq(roles[0], "window")
+    i := 1
+    while i < n {
+        pi: Int = parents[i]
+        test.assert_true(pi >= 0 and pi < i)          // parents come first
+        i = i + 1
+    }
+    ci := position_of(roles, "checkbox")
+    cs: Int = states[ci]
+    test.assert_eq(cs % 16 >= 8, true)                // checked bit
+    si := position_of(roles, "slider")
+    smax: Int = nums[4 * si + 2]
+    sval: Int = nums[4 * si + 3]
+    test.assert_eq(smax, 10)
+    test.assert_eq(sval, 3)
+    app.close()
+}
