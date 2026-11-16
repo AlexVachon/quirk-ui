@@ -5765,6 +5765,21 @@ struct AccessEvent {
     }
 }
 
+// The node a screen reader's focus is on when widget node `wn` has the
+// keyboard focus: the selected item of a list-like widget, else `wn`.
+define _a11y_focus_item(wn: AccessNode) -> AccessNode {
+    r := wn.role
+    if r != "list" and r != "tree" and r != "tablist" and r != "radiogroup" and r != "table" { return wn }
+    state := r == "radiogroup" ? "checked" : "selected"
+    for c in wn.children {
+        cn: AccessNode = c
+        if cn.role == "tabpanel" { continue }
+        hit := cn.find_state(state)
+        if hit != null { return hit }
+    }
+    return wn
+}
+
 // A list / table entry as text (a ListItem's text, or the value).
 define _entry_text(v: Any) -> String {
     if v != null and type(v) == "ListItem" {
@@ -5799,6 +5814,9 @@ struct App {
     _a11y_last: AccessNode
     _a11y_ids: Map
     _a11y_nodes: Map
+    _a11y_reported: Widget
+    _a11y_focus_id: Int
+    _a11y_sent_focus: Int
 
     define __init(self, title: String, width: Int, height: Int, theme: Theme = null, resizable: Bool = true, headless: Bool = false) -> void {
         self.win = window.open(title, width, height, resizable=resizable, headless=headless)
@@ -5829,6 +5847,9 @@ struct App {
         self._a11y_last = null
         self._a11y_ids = {}
         self._a11y_nodes = {}
+        self._a11y_reported = null
+        self._a11y_focus_id = 0
+        self._a11y_sent_focus = 0
         _close_popups()
     }
 
@@ -5956,13 +5977,39 @@ struct App {
         return tree
     }
 
-    // While a screen reader reads the window: send it the tree.
+    // While a screen reader reads the window: send it the tree. In a
+    // list, tree, tab strip, radio group or table the screen reader's focus
+    // is the selected item (it then says "photo.png, list item" or
+    // "Advanced, tab item, selected", and a new selection is a focus move)
+    // — as native Windows controls do.
     define _a11y_sync(self) -> void {
         if not self.win.access_active() { return }
-        tree := self.accessibility_with_ids()
+        tree := self._a11y_prepare()
         out := [[], [], [], [], [], [], [], [], []]
         self._a11y_flatten(tree, -1, out)
         self.win.access_update(out[0], out[1], out[2], out[3], out[4], out[5], out[6], out[7], out[8])
+    }
+
+    // The tree with ids, the screen reader's focus moved onto a selected item.
+    define _a11y_prepare(self) -> AccessNode {
+        tree := self.accessibility_with_ids()
+        self._a11y_focus_id = 0
+        f := self.focus
+        if f != null and f.focused and self._a11y_nodes.has(String(f.access_id())) {
+            wn: AccessNode = self._a11y_nodes[String(f.access_id())]
+            target := _a11y_focus_item(wn)
+            if target != wn {
+                kept := []
+                for st in wn.states {
+                    s: String = st
+                    if s != "focused" { kept.append(s) }
+                }
+                wn.states = kept
+                target.states.append("focused")
+            }
+            self._a11y_focus_id = target.id
+        }
+        return tree
     }
 
     // A screen reader's request (an "access" event).
@@ -5990,6 +6037,13 @@ struct App {
             self._a11y_focus = null
             return
         }
+        // The screen reader's focus (the widget, or its selected item).
+        moved := false
+        if active and self._a11y_focus_id != 0 and self._a11y_focus_id != self._a11y_sent_focus {
+            self.win.access_focus(self._a11y_focus_id)
+            self._a11y_sent_focus = self._a11y_focus_id
+            moved = true
+        }
         if f != self._a11y_focus {
             self.accessibility()                  // names fields from the Labels before them
             node := f.access_node()
@@ -5997,8 +6051,11 @@ struct App {
             if node == null { return }
             self._a11y_key = node.describe()
             self._a11y_last = node
-            if self.on_access != null { self.on_access(AccessEvent("focus", node)) }
-            if active { self.win.access_focus(node.id) }
+            // Focus that left for nothing and came back isn't news.
+            if f != self._a11y_reported {
+                self._a11y_reported = f
+                if self.on_access != null { self.on_access(AccessEvent("focus", node)) }
+            }
             return
         }
         node := f.access_node()
@@ -6007,7 +6064,8 @@ struct App {
         if k != self._a11y_key {
             self._a11y_key = k
             if self.on_access != null { self.on_access(AccessEvent("value", node)) }
-            if active {
+            // (A new selection in a list-like widget was a focus move above.)
+            if active and not moved and self._a11y_focus_id == node.id {
                 before := self._a11y_last
                 if before == null or before.value != node.value { self.win.access_changed(node.id, "value") }
                 if before == null or before.name != node.name { self.win.access_changed(node.id, "name") }

@@ -1750,3 +1750,39 @@ define test_accessibility_flat_export() -> void {
     test.assert_eq(sval, 3)
     app.close()
 }
+
+// For the screen reader, focus in a list-like widget is on its selected
+// item; and focus that leaves for nothing and comes back isn't repeated.
+define test_accessibility_focus_goes_to_selected_item() -> void {
+    if not window.available() { return }
+    app := new_app()
+    tabs := ui.Tabs(["General", "Advanced"], [ui.Label("1"), ui.Label("2")])
+    app.root = ui.Column([tabs])
+    app.layout()
+    app.focus_on(tabs)
+    tree := app.accessibility_with_ids()
+    tl := tree.find("", "tablist")
+    test.assert_eq(ui._a11y_focus_item(tl).name, "General")
+    tabs.select(1)
+    tree = app._a11y_prepare()
+    adv := tree.find("Advanced", "tab")
+    test.assert_true(adv.has("focused"))                    // the item carries the focus...
+    test.assert_false(tree.find("", "tablist").has("focused"))   // ...not the strip
+    test.assert_eq(app._a11y_focus_id, adv.id)
+    heard := []
+    app.on_access = fn(ev) {
+        e: ui.AccessEvent = ev
+        heard.append(e.kind)
+    }
+    name := ui.TextInput()
+    app.root = ui.Column([name])
+    app.layout()
+    app.focus_on(name)
+    app.step()
+    app.focus = null
+    app.step()
+    app.focus_on(name)
+    app.step()
+    test.assert_eq(heard, ["focus"])
+    app.close()
+}
