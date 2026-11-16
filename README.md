@@ -71,6 +71,13 @@ Every widget then lays out and draws in that font (proportional text,
 any character it has — text fields place the cursor by real widths).
 Without one, the built-in 8x16 font is used.
 
+Text fields work with input methods (Chinese, Japanese, Korean, dead
+keys): the text being composed shows at the cursor, underlined, and the
+input method's candidate list opens next to it. Use a font that has the
+script's characters (e.g. Noto Sans CJK) — one font is used for all text.
+On a Retina / 150-200% screen everything is drawn at full resolution at
+the same size (window 1.4).
+
 ```quirk
 app.animate(250, fn(t) { box.width = ui.lerp(40, 300, t) }, ease="out", on_done=fn() { print("done") })
 ```

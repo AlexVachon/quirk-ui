@@ -1,4 +1,4 @@
-// ui v1.6.0, headless: layout, events routed by App.dispatch, widget
+// ui v1.7.0, headless: layout, events routed by App.dispatch, widget
 // state and drawing. Every test is skipped (passes) without SDL2.
 use window
 use ui
@@ -1404,5 +1404,58 @@ define test_animation() -> void {
     app.animate(0, fn(t) { got.append(t) })
     app.step()
     test.assert_eq(got, [1.0])
+    app.close()
+}
+
+define composed(app: ui.App, s: String, cursor: Int) -> void {
+    e := ev("compose")
+    e.text = s
+    e.cursor = cursor
+    app.dispatch(e)
+}
+
+// IME: the composition shows at the cursor without changing the text; the
+// input method gets the keys (Backspace edits the composition, not the
+// text; Tab doesn't move focus); the committed text is inserted.
+define test_text_input_ime_composition() -> void {
+    if not window.available() { return }
+    app := new_app()
+    a := ui.TextInput("ab")
+    b := ui.TextInput()
+    app.root = ui.Column([a, b], padding=8)
+    app.layout()
+    click_on(app, a)
+    test.assert_true(a.focused)
+    composed(app, "にほ", 2)
+    test.assert_true(a.composing())
+    test.assert_eq(a.text, "ab")
+    key(app, "backspace")
+    key(app, "tab")
+    test.assert_eq(a.text, "ab")
+    test.assert_true(a.focused)
+    test.assert_true(app.step())                  // draws the composition inline
+    typed(app, "日本")
+    composed(app, "", 0)
+    test.assert_false(a.composing())
+    test.assert_eq(a.text, "ab日本")
+    test.assert_eq(a.cursor, 4)
+    key(app, "backspace")                         // keys edit the text again
+    test.assert_eq(a.text, "ab日")
+    app.close()
+}
+
+define test_text_area_ime_composition() -> void {
+    if not window.available() { return }
+    app := new_app()
+    area := ui.TextArea("one\ntwo", rows=3)
+    app.root = ui.Column([area], padding=8)
+    app.layout()
+    click_on(app, area)
+    composed(app, "한", 1)
+    test.assert_true(app.step())
+    test.assert_eq(area.text, "one\ntwo")
+    typed(app, "한")
+    test.assert_false(area.composing())
+    test.assert_true(area.text.endswith("한"))
     app.close()
 }

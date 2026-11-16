@@ -272,6 +272,11 @@ struct Widget {
         return false
     }
 
+    --- True while an input method is composing text in this widget (it gets every key). ---
+    define composing(self) -> Bool {
+        return false
+    }
+
     --- Child widgets (containers). ---
     define children(self) -> List {
         return []
@@ -759,6 +764,9 @@ struct TextEdit : Widget {
     _redo: List
     _typing: Bool
     _t: Theme
+    _compose: String
+    _compose_cursor: Int
+    _compose_len: Int
 
     define __init(self, text: String = "", on_change: Callable = null) -> void {
         super().__init()
@@ -775,6 +783,41 @@ struct TextEdit : Widget {
         self._cw = 8
         self._lh = 16
         self.focusable = true
+        self._compose = ""
+        self._compose_cursor = 0
+        self._compose_len = 0
+    }
+
+    define composing(self) -> Bool {
+        return self._compose != ""
+    }
+
+    define _text_w(self, s: String) -> Int {
+        if self._t == null { return s.length() * self._cw }
+        return self._t.text_w(s)
+    }
+
+    // An input method's composition (Chinese, Japanese, Korean...), drawn
+    // at the cursor — (x, y) is the top of its line: the text on the field's
+    // background, underlined (thick under the part the input method has
+    // selected), with its own cursor. Tells the system where it is, so the
+    // candidate list opens beside it. Returns its width.
+    define _draw_compose(self, win: window.Window, t: Theme, x: Int, y: Int) -> Int {
+        lh := t.line()
+        c := self._compose
+        cw := self._text_w(c)
+        win.rect(x, y, cw, lh, t.input)
+        win.text(c, x, y, t.text, scale=t.scale, font=t.font)
+        win.rect(x, y + lh - 1, cw, 1, t.text)
+        at := _clamp(self._compose_cursor, 0, c.length())
+        cx := x + self._text_w(c.substring(0, at))
+        if self._compose_len > 0 {
+            end := _clamp(at + self._compose_len, at, c.length())
+            win.rect(cx, y + lh - 2, self._text_w(c.substring(at, end)), 2, t.accent)
+        }
+        win.rect(cx, y, _max(1, t.scale), lh, t.text)
+        win.text_input_area(x, y, _max(1, cw), lh)
+        return cw
     }
 
     define _changed(self) -> void {
@@ -1007,7 +1050,19 @@ struct TextEdit : Widget {
 
     // Editing keys and mouse handling both widgets share; true if used.
     define _edit(self, e: window.Event) -> Bool {
+        if e.kind == "compose" {
+            self._compose = e.text
+            self._compose_cursor = e.cursor
+            self._compose_len = e.length
+            return true
+        }
+        // While composing, the input method uses the keys (Backspace edits
+        // the composition, Enter accepts it) — they don't edit the text.
+        if self._compose != "" and (e.kind == "key_down" or e.kind == "key_up") and not e.ctrl and not e.meta {
+            return true
+        }
         if e.kind == "text" {
+            self._compose = ""
             self.insert(e.text)
             return true
         }
@@ -1181,9 +1236,22 @@ struct TextInput : TextEdit {
             }
             win.text(self.text.substring(self._scroll, end), self.x + 8, ty, _ink(self, t.text, t), scale=t.scale, font=t.font)
         }
-        if self.focused and (window.ticks() / 530) % 2 == 0 {
+        if not self.focused { self._compose = "" }
+        if self.focused {
             cx := self.x + 8 + self._span_w(self._scroll, self.cursor)
-            win.rect(cx, ty, _max(1, t.scale), t.line(), t.text)
+            if self._compose != "" {
+                // Inline: the composition at the cursor, the rest after it.
+                _clip_push(win, self.x + 1, self.y + 1, self.width - 2, self.height - 2)
+                win.rect(cx, self.y + 1, _max(0, self.x + self.width - 1 - cx), self.height - 2, t.input)
+                cw := self._draw_compose(win, t, cx, ty)
+                if end > self.cursor {
+                    win.text(self.text.substring(self.cursor, end), cx + cw, ty, _ink(self, t.text, t), scale=t.scale, font=t.font)
+                }
+                _clip_pop(win)
+            } else {
+                win.text_input_area(cx, ty, 1, t.line())
+                if (window.ticks() / 530) % 2 == 0 { win.rect(cx, ty, _max(1, t.scale), t.line(), t.text) }
+            }
         }
     }
 }
@@ -1446,8 +1514,22 @@ struct TextArea : TextEdit {
             }
             r = r + 1
         }
-        if self.focused and (window.ticks() / 530) % 2 == 0 and cr >= self._top and cr < self._top + shown {
-            win.rect(self.x + 8 + self._span_w(cra + self._left, self.cursor), self.y + 6 + (cr - self._top) * lh, _max(1, t.scale), lh, t.text)
+        if not self.focused { self._compose = "" }
+        if self.focused and cr >= self._top and cr < self._top + shown {
+            cx := self.x + 8 + self._span_w(cra + self._left, self.cursor)
+            cy := self.y + 6 + (cr - self._top) * lh
+            if self._compose != "" {
+                // Inline: the composition at the cursor, the rest of the row after it.
+                win.rect(cx, cy, _max(0, self.x + self.width - 1 - cx), lh, t.input)
+                cw := self._draw_compose(win, t, cx, cy)
+                crb: Int = crow[1]
+                if crb > self.cursor {
+                    win.text(self.text.substring(self.cursor, crb), cx + cw, cy, _ink(self, t.text, t), scale=t.scale, font=t.font)
+                }
+            } else {
+                win.text_input_area(cx, cy, 1, lh)
+                if (window.ticks() / 530) % 2 == 0 { win.rect(cx, cy, _max(1, t.scale), lh, t.text) }
+            }
         }
         _clip_pop(win)
         // Scroll indicator when there are more rows than fit.
@@ -2431,7 +2513,7 @@ struct DatePicker : Widget {
     }
 
     define popup_key(self, e: window.Event) -> Bool {
-        if e.kind != "key_down" { return e.kind == "key_up" or e.kind == "text" }
+        if e.kind != "key_down" { return e.kind == "key_up" or e.kind == "text" or e.kind == "compose" }
         k := e.key
         if k == "left" { self._shift_day(-1) }
         elif k == "right" { self._shift_day(1) }
@@ -3268,7 +3350,7 @@ struct Table : Widget {
                 self.finish_edit(false)
                 return true
             }
-            if e.kind == "key_down" or e.kind == "text" or inside or (e.kind != "mouse_down" and self._editor._dragging) {
+            if e.kind == "key_down" or e.kind == "text" or e.kind == "compose" or inside or (e.kind != "mouse_down" and self._editor._dragging) {
                 self._editor.handle(e)
                 return true
             }
@@ -4134,7 +4216,7 @@ struct Menu : Widget {
     }
 
     define popup_key(self, e: window.Event) -> Bool {
-        if e.kind != "key_down" { return e.kind == "key_up" or e.kind == "text" }
+        if e.kind != "key_down" { return e.kind == "key_up" or e.kind == "text" or e.kind == "compose" }
         k := e.key
         if k == "down" {
             self._step(1)
@@ -5181,12 +5263,18 @@ struct App {
             }
             return
         }
+        // An input method composing in the focused field gets every key
+        // (no shortcuts, no Tab) until it's done.
+        if (k == "key_down" or k == "key_up" or k == "compose" or k == "text") and self.focus != null and self.focus.composing() {
+            self.focus.handle(e)
+            return
+        }
         if k == "key_down" and self.on_key != null { self.on_key(e) }
         // Menu shortcuts: from any menu bar, and the right-click menus of the
         // focused widget and those around it. Not while a popup is open.
         if k == "key_down" and _popups.length() == 0 and self._run_shortcut(e) { return }
         // An open popup that takes keys (a menu) gets them first.
-        if (k == "key_down" or k == "key_up" or k == "text") and _popups.length() > 0 {
+        if (k == "key_down" or k == "key_up" or k == "text" or k == "compose") and _popups.length() > 0 {
             top: Widget = _popups[_popups.length() - 1]
             if top.popup_key(e) { return }
         }
@@ -5194,7 +5282,7 @@ struct App {
             self._cycle_focus(e.shift)
             return
         }
-        if k == "key_down" or k == "key_up" or k == "text" {
+        if k == "key_down" or k == "key_up" or k == "text" or k == "compose" {
             if self.focus != null and self.focus.visible and self.focus.enabled { self.focus.handle(e) }
             return
         }
