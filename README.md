@@ -73,8 +73,9 @@ Without one, the built-in 8x16 font is used.
 
 Text fields work with input methods (Chinese, Japanese, Korean, dead
 keys): the text being composed shows at the cursor, underlined, and the
-input method's candidate list opens next to it. Use a font that has the
-script's characters (e.g. Noto Sans CJK) — one font is used for all text.
+input method's candidate list opens next to it. Characters the theme's
+font doesn't have come from the system's fonts (window 1.6) — or add one:
+`app.theme.font.add_fallback(path)`.
 On a Retina / 150-200% screen everything is drawn at full resolution at
 the same size (window 1.4).
 
