@@ -161,6 +161,27 @@ routes one event — for your own loop or headless tests. Themes:
 Your own widgets: subclass `ui.Widget` and override `measure`, `draw`,
 `handle` (and `children` for containers).
 
+## Accessibility
+
+`app.accessibility()` is the window as assistive technology (a screen
+reader) sees it: a tree of `ui.AccessNode`s — `role` ("button",
+"checkbox", "textbox", "slider", "list" / "listitem", "tab", "menu" /
+"menuitem", "table" / "row" / "cell", "treeitem"...), `name`, `value`,
+`states` ("focused", "checked", "selected", "expanded", "disabled"...)
+and the box of every visible widget and item. Names come from what a
+widget shows, a Label just before it, a placeholder or tooltip — set
+`w.accessible_name` (and `accessible_description`) where that isn't
+enough, e.g. icon-only buttons.
+
+```quirk
+print(app.accessibility().dump())
+app.on_access = fn(e) { print(e.kind + ": " + e.node.describe()) }   // "focus" / "value" / "announce"
+app.announce("Saved")
+```
+
+This is the platform-neutral half: connecting it to the system screen
+readers (Windows UI Automation first) comes next.
+
 ## Requirements
 
 - The Quirk compiler 7.33.0+ and `window` 1.3.0+ (clipping, the clipboard, fonts).

@@ -1518,3 +1518,115 @@ define test_text_area_right_to_left_rows() -> void {
     test.assert_eq(area.cursor, 0)                           // the Latin row is unchanged
     app.close()
 }
+
+// Accessibility tree: roles, names (from text, Labels, placeholders,
+// accessible_name), values and states; Spacers and hidden widgets left out.
+define test_accessibility_tree() -> void {
+    if not window.available() { return }
+    app := new_app()
+    name := ui.TextInput("Ada")
+    note := ui.TextInput(placeholder="Search")
+    icon := ui.Button("*")
+    icon.accessible_name = "Preferences"
+    hidden := ui.Button("Hidden")
+    hidden.visible = false
+    lv := ui.ListView(["one", ui.ListItem("two")], rows=2)
+    lv.selected = 1
+    app.root = ui.Column([
+        ui.Row([ui.Label("Name"), name]),
+        note,
+        ui.Checkbox("Subscribe", checked=true),
+        ui.Slider(0, 10, value=4),
+        ui.Spacer(),
+        lv,
+        ui.Tabs(["General", "Advanced"], [ui.Label("one"), ui.Label("two")], selected=1),
+        ui.Row([icon, hidden]),
+    ], padding=8)
+    app.layout()
+    tree := app.accessibility()
+    test.assert_eq(tree.role, "window")
+    test.assert_eq(tree.name, "ui test")
+    field := tree.find("Name", "textbox")
+    test.assert_true(field != null)                          // named by the Label before it
+    test.assert_eq(field.value, "Ada")
+    test.assert_true(field.has("editable"))
+    search := tree.find("Search", "textbox")
+    test.assert_true(search != null)                         // named by its placeholder
+    sub := tree.find("Subscribe", "checkbox")
+    test.assert_true(sub.has("checked"))
+    test.assert_eq(sub.widget.access_role(), "checkbox")
+    slider := tree.find("", "slider")
+    test.assert_eq(slider.value, "4")
+    test.assert_true(tree.find("two", "listitem").has("selected"))
+    test.assert_false(tree.find("one", "listitem").has("selected"))
+    test.assert_true(tree.find("Advanced", "tab").has("selected"))
+    test.assert_true(tree.find("two", "text") != null)       // the shown page
+    test.assert_true(tree.find("one", "text") == null)       // the hidden one isn't
+    test.assert_true(tree.find("Preferences", "button") != null)
+    test.assert_true(tree.find("Hidden") == null)
+    dump := tree.dump()
+    test.assert_true(dump.contains("checkbox \"Subscribe\" [focusable, checked]"))
+    test.assert_false(dump.contains("spacer"))
+    app.close()
+}
+
+// on_access hears focus moves, value changes of the focused widget, and
+// announcements.
+define test_accessibility_events() -> void {
+    if not window.available() { return }
+    app := new_app()
+    heard := []
+    app.on_access = fn(ev) {
+        e: ui.AccessEvent = ev
+        heard.append(e.kind + " " + e.node.describe())
+    }
+    name := ui.TextInput()
+    ok := ui.Button("OK")
+    app.root = ui.Column([ui.Row([ui.Label("Name"), name]), ok], padding=8)
+    app.layout()
+    test.assert_true(app.step())
+    test.assert_eq(heard, [])                                 // nothing focused yet
+    click_on(app, name)
+    app.step()
+    typed(app, "Al")
+    app.step()
+    app.step()                                                // no change: nothing new
+    key(app, "tab")
+    app.step()
+    app.announce("Saved")
+    test.assert_eq(heard, ["focus textbox \"Name\" [focusable, focused, editable]",
+                           "value textbox \"Name\" = \"Al\" [focusable, focused, editable]",
+                           "focus button \"OK\" [focusable, focused]",
+                           "announce alert \"Saved\""])
+    app.close()
+}
+
+// Open menus and dropdown lists appear in the tree with their items.
+define test_accessibility_menus_and_dropdowns() -> void {
+    if not window.available() { return }
+    app := new_app()
+    file := ui.Menu([ui.MenuItem("New", shortcut="Ctrl+N"), ui.MenuItem("-"), ui.MenuItem("Save", enabled=false)])
+    bar := ui.MenuBar(["File"], [file])
+    dd := ui.Dropdown(["Small", "Large"])
+    app.root = ui.Column([bar, dd, ui.Spacer(120)])
+    app.layout()
+    app.draw()
+    tree := app.accessibility()
+    test.assert_true(tree.find("File", "menuitem").has("collapsed"))
+    test.assert_eq(tree.find("", "combobox").value, "Small")
+    test.assert_true(tree.find("Small", "option") == null)      // closed: no options
+    click(app, bar.x + 10, bar.y + 5)
+    app.draw()
+    tree = app.accessibility()
+    test.assert_true(tree.find("File", "menuitem").has("expanded"))
+    new_item := tree.find("New", "menuitem")
+    test.assert_eq(new_item.description, "Ctrl+N")
+    test.assert_true(tree.find("Save", "menuitem").has("disabled"))
+    test.assert_true(tree.find("-") == null)                    // separators left out
+    key(app, "escape")
+    click_on(app, dd)
+    tree = app.accessibility()
+    test.assert_true(tree.find("Large", "option") != null)
+    test.assert_true(tree.find("", "combobox").has("expanded"))
+    app.close()
+}
