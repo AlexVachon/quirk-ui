@@ -76,6 +76,12 @@ keys): the text being composed shows at the cursor, underlined, and the
 input method's candidate list opens next to it. Characters the theme's
 font doesn't have come from the system's fonts (window 1.6) — or add one:
 `app.theme.font.add_fallback(path)`.
+
+Right-to-left text (Hebrew, Arabic, mixed with Latin) is drawn in
+reading order with Arabic letters joined; text fields and areas put
+right-to-left lines against the right edge, and the cursor, clicks,
+selection and the arrow keys follow the visual order (needs a TrueType
+font).
 On a Retina / 150-200% screen everything is drawn at full resolution at
 the same size (window 1.4).
 

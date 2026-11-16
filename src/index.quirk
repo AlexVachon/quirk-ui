@@ -797,6 +797,19 @@ struct TextEdit : Widget {
         return self._t.text_w(s)
     }
 
+    // The line the cursor is on reads right to left (Hebrew, Arabic...).
+    define _rtl_here(self) -> Bool {
+        a := self._line_start(self.cursor)
+        b := self._line_end(self.cursor)
+        if b <= a { return false }
+        return window.is_rtl(self.text.substring(a, b))
+    }
+
+    // `s` needs the font's visual layout (right-to-left or mixed text).
+    define _bidi(self, s: String) -> Bool {
+        return self._t != null and self._t.font != null and window.has_rtl(s)
+    }
+
     // An input method's composition (Chinese, Japanese, Korean...), drawn
     // at the cursor — (x, y) is the top of its line: the text on the field's
     // background, underlined (thick under the part the input method has
@@ -1089,6 +1102,11 @@ struct TextEdit : Widget {
         if e.kind != "key_down" { return false }
         k := e.key
         mod := e.ctrl or e.meta
+        // In a line that reads right to left, Left moves on through the
+        // text (the cursor goes the way the arrow points).
+        if (k == "left" or k == "right") and self._rtl_here() {
+            k = k == "left" ? "right" : "left"
+        }
         if mod and (k == "y" or (k == "z" and e.shift)) {
             self.redo()
         } elif mod and k == "z" {
@@ -1160,6 +1178,7 @@ struct TextInput : TextEdit {
     columns: Int
     on_submit: Callable
     _scroll: Int
+    _voff: Int
 
     define __init(self, text: String = "", placeholder: String = "", on_change: Callable = null, on_submit: Callable = null, columns: Int = 20) -> void {
         super().__init(text, on_change)
@@ -1168,6 +1187,7 @@ struct TextInput : TextEdit {
         self.on_submit = on_submit
         self.single_line = true
         self._scroll = 0
+        self._voff = 0
     }
 
     define measure(self, t: Theme) -> void {
@@ -1179,6 +1199,9 @@ struct TextInput : TextEdit {
     }
 
     define index_at(self, px: Int, py: Int) -> Int {
+        if self._bidi(self.text) {
+            return self._t.font.index_at(self.text, px - self.x - 8 - self._voff)
+        }
         return self._index_near(self._scroll, self.text.length(), px - self.x - 8)
     }
 
@@ -1213,6 +1236,10 @@ struct TextInput : TextEdit {
         self._t = t
         avail := _max(1, self.width - 16)
         n := self.text.length()
+        if n > 0 and self._bidi(self.text) {
+            self._draw_bidi(win, t, avail)
+            return
+        }
         // Keep the cursor in view.
         if self.cursor < self._scroll { self._scroll = self.cursor }
         while self._scroll < self.cursor and self._span_w(self._scroll, self.cursor) > avail { self._scroll = self._scroll + 1 }
@@ -1253,6 +1280,43 @@ struct TextInput : TextEdit {
                 if (window.ticks() / 530) % 2 == 0 { win.rect(cx, ty, _max(1, t.scale), t.line(), t.text) }
             }
         }
+    }
+
+    // Right-to-left or mixed text: the font lays the whole line out in
+    // visual order; it's aligned right when it reads right to left and
+    // shifted to keep the cursor in view (clipped to the field).
+    define _draw_bidi(self, win: window.Window, t: Theme, avail: Int) -> void {
+        f := t.font
+        ty := self.y + (self.height - t.line()) / 2
+        self._scroll = 0
+        off := 0
+        if window.is_rtl(self.text) { off = avail - f.width(self.text) }
+        ccx := f.caret_x(self.text, self.cursor)
+        if off + ccx > avail { off = avail - ccx }
+        if off + ccx < 0 { off = -ccx }
+        self._voff = off
+        x0 := self.x + 8 + off
+        _clip_push(win, self.x + 1, self.y + 1, self.width - 2, self.height - 2)
+        if self.has_selection() {
+            for piece in f.selection(self.text, self.selection_start(), self.selection_end()) {
+                pc: List = piece
+                px: Int = pc[0]
+                pw: Int = pc[1]
+                win.rect(x0 + px, ty, pw, t.line(), _sel_color(self, t))
+            }
+        }
+        win.text(self.text, x0, ty, _ink(self, t.text, t), scale=t.scale, font=f)
+        if not self.focused { self._compose = "" }
+        if self.focused {
+            cx := x0 + ccx
+            if self._compose != "" {
+                self._draw_compose(win, t, cx, ty)
+            } else {
+                win.text_input_area(cx, ty, 1, t.line())
+                if (window.ticks() / 530) % 2 == 0 { win.rect(cx, ty, _max(1, t.scale), t.line(), t.text) }
+            }
+        }
+        _clip_pop(win)
     }
 }
 
@@ -1298,6 +1362,12 @@ struct TextArea : TextEdit {
         self._lh = t.line()
         self.min_w = self.columns * t.char_w() + 16
         self.min_h = self.rows * t.line() + 12
+    }
+
+    // A right-to-left row is drawn against the right edge.
+    define _row_off(self, seg: String) -> Int {
+        if not window.is_rtl(seg) { return 0 }
+        return _max(0, self.width - 16 - self._t.font.width(seg))
     }
 
     define _shown_rows(self) -> Int {
@@ -1388,6 +1458,10 @@ struct TextArea : TextEdit {
         row: List = rows[r]
         ra: Int = row[0]
         rb: Int = row[1]
+        if rb > ra and self._bidi(self.text.substring(ra, rb)) {
+            seg := self.text.substring(ra, rb)
+            return self._at_row(rows, r, self._t.font.index_at(seg, px - self.x - 8 - self._row_off(seg)))
+        }
         idx := self._index_near(_min(ra + left, rb), rb, px - self.x - 8)
         return self._at_row(rows, r, idx - ra)
     }
@@ -1488,6 +1562,23 @@ struct TextArea : TextEdit {
             ra: Int = row[0]
             rb: Int = row[1]
             ly := self.y + 6 + (r - self._top) * lh
+            bseg := ""
+            if rb > ra { bseg = self.text.substring(ra, rb) }
+            if rb > ra and self._bidi(bseg) {
+                // Right-to-left / mixed row: laid out by the font.
+                bx := self.x + 8 + self._row_off(bseg)
+                if sb > sa and _max(sa, ra) < _min(sb, rb) {
+                    for piece in t.font.selection(bseg, _max(sa, ra) - ra, _min(sb, rb) - ra) {
+                        pc: List = piece
+                        px: Int = pc[0]
+                        pw: Int = pc[1]
+                        win.rect(bx + px, ly, pw, lh, _sel_color(self, t))
+                    }
+                }
+                win.text(bseg, bx, ly, _ink(self, t.text, t), scale=t.scale, font=t.font)
+                r = r + 1
+                continue
+            }
             if sb > sa {
                 a := _max(sa, ra)
                 b := _min(sb, rb)
@@ -1517,6 +1608,11 @@ struct TextArea : TextEdit {
         if not self.focused { self._compose = "" }
         if self.focused and cr >= self._top and cr < self._top + shown {
             cx := self.x + 8 + self._span_w(cra + self._left, self.cursor)
+            crb0: Int = crow[1]
+            if crb0 > cra and self._bidi(self.text.substring(cra, crb0)) {
+                cseg := self.text.substring(cra, crb0)
+                cx = self.x + 8 + self._row_off(cseg) + t.font.caret_x(cseg, self.cursor - cra)
+            }
             cy := self.y + 6 + (cr - self._top) * lh
             if self._compose != "" {
                 // Inline: the composition at the cursor, the rest of the row after it.

@@ -1459,3 +1459,62 @@ define test_text_area_ime_composition() -> void {
     test.assert_true(area.text.endswith("한"))
     app.close()
 }
+
+define rtl_app() -> ui.App {
+    path := system_font()
+    if path == "" or not window.available() { return null }
+    f := window.load_font(path, 16)
+    if not f.covers("שלום") { return null }
+    t := ui.light()
+    t.font = f
+    return ui.App("rtl", 400, 300, theme=t, headless=true)
+}
+
+// Right-to-left text in a TextInput: right-aligned, a click near the
+// right edge puts the cursor at the start, Left moves forward through the
+// text, selection and typing work.
+define test_text_input_right_to_left() -> void {
+    app := rtl_app()
+    if app == null { return }
+    input := ui.TextInput("שלום", columns=20)
+    app.root = ui.Column([input], padding=8)
+    app.layout()
+    test.assert_true(app.step())
+    click(app, input.x + input.width - 9, input.y + input.height / 2)
+    test.assert_true(input.focused)
+    test.assert_eq(input.cursor, 0)                          // the start of the text is on the right
+    click(app, input.x + 9, input.y + input.height / 2)
+    test.assert_eq(input.cursor, 4)                          // left of the (right-aligned) text: its end
+    key(app, "home")
+    key(app, "left")                                         // RTL: Left moves on through the text
+    test.assert_eq(input.cursor, 1)
+    key(app, "right")
+    test.assert_eq(input.cursor, 0)
+    key(app, "end")
+    typed(app, " עולם")
+    test.assert_eq(input.text, "שלום עולם")
+    key(app, "home")
+    e := ev("key_down")
+    e.key = "end"
+    e.shift = true
+    app.dispatch(e)
+    test.assert_eq(input.selected_text(), "שלום עולם")
+    test.assert_true(app.step())                             // selection drawn from the visual layout
+    app.close()
+}
+
+define test_text_area_right_to_left_rows() -> void {
+    app := rtl_app()
+    if app == null { return }
+    area := ui.TextArea("abc\nשלום", rows=3, columns=20)
+    app.root = ui.Column([area], padding=8)
+    app.layout()
+    test.assert_true(app.step())
+    lh := app.theme.line()
+    // Second row (Hebrew) is right-aligned: a click near the right edge is its start.
+    click(app, area.x + area.width - 9, area.y + 6 + lh + lh / 2)
+    test.assert_eq(area.cursor, 4)                           // index 4 = the start of "שלום"
+    click(app, area.x + 9, area.y + 6 + lh / 2)
+    test.assert_eq(area.cursor, 0)                           // the Latin row is unchanged
+    app.close()
+}
