@@ -1981,3 +1981,22 @@ define test_timers() -> void {
     test.assert_true(app._next_wake() < 0)                       // nothing left to wake for
     app.close()
 }
+
+// on_key returning true: the key goes no further (an app's own shortcut).
+define test_on_key_can_keep_the_key() -> void {
+    if not window.available() { return }
+    app := new_app()
+    field := ui.TextInput("abc")
+    app.root = ui.Column([field], padding=8)
+    app.on_key = fn(e) {
+        if e.key == "backspace" and e.ctrl { return true }
+        return false
+    }
+    app.layout()
+    click_on(app, field)
+    keym(app, "backspace", ctrl=true)                            // kept by the app
+    test.assert_eq(field.text, "abc")
+    keym(app, "backspace")                                       // not kept: the field's
+    test.assert_eq(field.text, "ab")
+    app.close()
+}

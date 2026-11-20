@@ -6096,7 +6096,8 @@ A window showing a widget tree. Set `root`, then `run()`.
   `focus`     — the widget with the keyboard focus (or null)
   `tooltip_delay` — ms the mouse rests on a widget before its tooltip shows
   `on_key`    — optional `fn(e)` called for every key press, before the
-                focused widget sees it (shortcuts: `if e.ctrl and e.key == "s"`)
+                focused widget sees it (shortcuts: `if e.ctrl and e.key == "s"`);
+                returning true keeps the key from the focused widget
 `step()` runs one frame yourself (custom loops, tests).
 ---
 // ===== Accessibility =====
@@ -6882,7 +6883,12 @@ struct App {
             self.focus.handle(e)
             return
         }
-        if k == "key_down" and self.on_key != null { self.on_key(e) }
+        // on_key returning true keeps the key from everyone else (an app's
+        // own shortcut — not typed into the focused terminal / field too).
+        if k == "key_down" and self.on_key != null {
+            used := self.on_key(e)
+            if used == true { return }
+        }
         // Menu shortcuts: from any menu bar, and the right-click menus of the
         // focused widget and those around it. Not while a popup is open.
         if k == "key_down" and _popups.length() == 0 and self._run_shortcut(e) { return }
