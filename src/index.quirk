@@ -541,6 +541,7 @@ struct Column : Widget {
     padding: Int
     spacing: Int
     background: Bool
+    fill: Int                // a colour to fill it with, no border (-1: none) — a side panel
     _kids: List
 
     define __init(self, children: List, padding: Int = 0, spacing: Int = 8, expand: Bool = false) -> void {
@@ -549,6 +550,7 @@ struct Column : Widget {
         self.padding = padding
         self.spacing = spacing
         self.background = false
+        self.fill = -1
         self.expand = expand
     }
 
@@ -601,6 +603,7 @@ struct Column : Widget {
     }
 
     define draw(self, win: window.Window, t: Theme) -> void {
+        if self.fill != -1 { win.rect(self.x, self.y, self.width, self.height, self.fill) }
         if self.background {
             win.rect(self.x, self.y, self.width, self.height, t.surface)
             win.rect(self.x, self.y, self.width, self.height, t.border, fill=false)
@@ -3336,13 +3339,29 @@ A tree of `ui.TreeNode`s, nested nodes indented. Click the arrow (or
 double-click the row) to expand / collapse; click a row to select it.
 Keys: Up / Down move, Right expands (or goes to the first child), Left
 collapses (or goes to the parent), Enter toggles. `on_select(node)` runs
-when the selection changes; `selected` is the node (or null).
+when the selection changes; `selected` is the node (or null);
+`on_expand(node)` runs just before a node opens (fill in its children
+then: a folder read lazily).
+
+`flat=true` is the look of a side bar (a file explorer): no box, rows lit
+under the mouse, the selected row tinted (outlined while focused), thin
+chevrons, and a click on a parent opens / closes it. `row_height`,
+`indent`, `guides` (lines down each level) and `icon` — `fn(node)` giving
+`[text, colour]` (a badge before the name: "Q", "{}") or null — fine-tune
+either look; `background` fills it (-1: the theme's input colour, or
+nothing when flat).
 ---
 struct TreeView : Widget {
     roots: List
     selected: TreeNode
     on_select: Callable
+    on_expand: Callable
     rows: Int
+    flat: Bool
+    row_height: Int
+    guides: Bool
+    icon: Callable
+    background: Int
     _top: Int
     _ind: Int
     define access_action(self, action: String, value: String, node: AccessNode) -> Bool {
@@ -3390,24 +3409,50 @@ struct TreeView : Widget {
     }
 
 
-    define __init(self, roots: List, on_select: Callable = null, rows: Int = 8, expand: Bool = false) -> void {
+    define __init(self, roots: List, on_select: Callable = null, rows: Int = 8, expand: Bool = false,
+                  flat: Bool = false, row_height: Int = 24, indent: Int = 16, guides: Bool = false,
+                  icon: Callable = null, on_expand: Callable = null, background: Int = -1) -> void {
         super().__init()
         self.roots = roots
         self.selected = null
         self.on_select = on_select
+        self.on_expand = on_expand
         self.rows = rows
         self.expand = expand
+        self.flat = flat
+        self.row_height = row_height
+        self.guides = guides
+        self.icon = icon
+        self.background = background
         self._top = 0
-        self._ind = 16
+        self._ind = indent
         self.focusable = true
     }
 
+    --- How far each level is indented (pixels). ---
+    define indent(self) -> Int {
+        return self._ind
+    }
+
+    define set_indent(self, px: Int) -> void {
+        self._ind = _max(0, px)
+    }
+
     define _row_h(self) -> Int {
-        return 24
+        return self.row_height
+    }
+
+    define _open(self, node: TreeNode) -> void {
+        if self.on_expand != null { self.on_expand(node) }
+        node.expanded = true
+    }
+
+    define _pad(self) -> Int {
+        return self.flat ? 0 : 2
     }
 
     define _shown(self) -> Int {
-        return _max(1, (self.height - 4) / self._row_h())
+        return _max(1, (self.height - 2 * self._pad()) / self._row_h())
     }
 
     define _flatten(self, nodes: List, out: List) -> void {
@@ -3453,7 +3498,7 @@ struct TreeView : Widget {
     --- Expand or collapse `node`. ---
     define toggle(self, node: TreeNode) -> void {
         if node.children.length() == 0 { return }
-        node.expanded = not node.expanded
+        if node.expanded { node.expanded = false } else { self._open(node) }
         // A selected node hidden by the collapse: select the collapsed one.
         if not node.expanded and self.selected != null {
             p := self.selected.parent
@@ -3471,22 +3516,24 @@ struct TreeView : Widget {
         widest := 10
         for c in self.visible_nodes() {
             n: TreeNode = c
-            widest = _max(widest, n.depth() * self._ind + 16 + t.text_w(n.text))
+            widest = _max(widest, n.depth() * self._ind + 16 + t.text_w(n.text) + (self.icon != null ? 18 : 0))
         }
         self.min_w = _min(widest, 60 * t.char_w()) + 16
-        self.min_h = self.rows * self._row_h() + 4
+        self.min_h = self.rows * self._row_h() + 2 * self._pad()
     }
 
     define handle(self, e: window.Event) -> Bool {
         if not self.enabled { return false }
         vis := self.visible_nodes()
         if e.kind == "mouse_down" and e.button == 1 {
-            row := (e.y - self.y - 2) / self._row_h()
+            row := (e.y - self.y - self._pad()) / self._row_h()
             i := self._top + row
             if row >= 0 and i < vis.length() {
                 n: TreeNode = vis[i]
                 arrow_x := self.x + 6 + n.depth() * self._ind
-                if e.clicks >= 2 or (e.x >= arrow_x - 2 and e.x < arrow_x + 14) {
+                if self.flat {
+                    if e.clicks <= 1 { self.toggle(n) }            // a click opens / closes a parent (not again on a double-click)
+                } elif e.clicks >= 2 or (e.x >= arrow_x - 2 and e.x < arrow_x + 14) {
                     self.toggle(n)
                 }
                 self.select(n)
@@ -3515,7 +3562,7 @@ struct TreeView : Widget {
         } elif k == "right" {
             n := self.selected
             if n.children.length() > 0 and not n.expanded {
-                n.expanded = true
+                self._open(n)
             } elif n.children.length() > 0 {
                 self.select(n.children[0])
             }
@@ -3534,8 +3581,92 @@ struct TreeView : Widget {
         return true
     }
 
+    // The badge `icon(node)` gives, at tx; where the name starts.
+    define _draw_icon(self, win: window.Window, t: Theme, n: TreeNode, tx: Int, ry: Int, rh: Int) -> Int {
+        if self.icon == null { return tx }
+        got := self.icon(n)
+        if got == null { return tx }
+        parts: List = got
+        label := String(parts[0])
+        color: Int = parts[1]
+        if label != "" {
+            lw := t.text_w(label)
+            win.text(label, tx + _max(0, (14 - lw) / 2), ry + (rh - t.line()) / 2, _ink(self, color, t), scale=t.scale, font=t.font)
+        }
+        return tx + 20
+    }
+
+    // The side-bar look (flat=true).
+    define _draw_flat(self, win: window.Window, t: Theme) -> void {
+        base := self.background != -1 ? self.background : t.background
+        if self.background != -1 { win.rect(self.x, self.y, self.width, self.height, base) }
+        vis := self.visible_nodes()
+        rh := self._row_h()
+        shown := self._shown()
+        most := _max(0, vis.length() - shown)
+        if self._top > most { self._top = most }
+        hover_row := -1
+        if self.hovered {
+            m := win.mouse()
+            if m.0 >= self.x and m.0 < self.x + self.width and m.1 >= self.y {
+                hover_row = (m.1 - self.y) / rh
+            }
+        }
+        guide := mix(base, t.text, 14)
+        _clip_push(win, self.x, self.y, self.width, self.height)
+        i := self._top
+        while i < vis.length() and i < self._top + shown {
+            n: TreeNode = vis[i]
+            ry := self.y + (i - self._top) * rh
+            if n == self.selected {
+                if self.focused {
+                    win.rect(self.x, ry, self.width, rh, mix(base, t.accent, 28))
+                    win.rect(self.x, ry, self.width, rh, t.accent, fill=false)
+                } else {
+                    win.rect(self.x, ry, self.width, rh, mix(base, t.text, 13))
+                }
+            } elif i - self._top == hover_row {
+                win.rect(self.x, ry, self.width, rh, mix(base, t.text, 7))
+            }
+            depth := n.depth()
+            if self.guides {
+                d := 0
+                while d < depth {
+                    win.rect(self.x + 10 + d * self._ind, ry, 1, rh, guide)
+                    d = d + 1
+                }
+            }
+            ax := self.x + 6 + depth * self._ind
+            cy := ry + rh / 2
+            ink := _ink(self, t.text, t)
+            if n.children.length() > 0 {
+                // A thin chevron: › closed, ⌄ open.
+                if n.expanded {
+                    win.line(ax, cy - 2, ax + 4, cy + 2, ink)
+                    win.line(ax + 4, cy + 2, ax + 8, cy - 2, ink)
+                } else {
+                    win.line(ax + 2, cy - 4, ax + 6, cy, ink)
+                    win.line(ax + 6, cy, ax + 2, cy + 4, ink)
+                }
+            }
+            tx := self._draw_icon(win, t, n, ax + 16, ry, rh)
+            win.text(n.text, tx, ry + (rh - t.line()) / 2, ink, scale=t.scale, font=t.font)
+            i = i + 1
+        }
+        _clip_pop(win)
+        if vis.length() > shown and self.hovered {
+            bar := _max(16, self.height * shown / vis.length())
+            by := self.y + (self.height - bar) * self._top / _max(1, most)
+            win.rect(self.x + self.width - 8, by, 8, bar, mix(base, t.text, 22))
+        }
+    }
+
     define draw(self, win: window.Window, t: Theme) -> void {
-        win.rect(self.x, self.y, self.width, self.height, t.input)
+        if self.flat {
+            self._draw_flat(win, t)
+            return
+        }
+        win.rect(self.x, self.y, self.width, self.height, self.background != -1 ? self.background : t.input)
         border := t.border
         if self.focused { border = t.accent }
         win.rect(self.x, self.y, self.width, self.height, border, fill=false)
@@ -3568,7 +3699,9 @@ struct TreeView : Widget {
                     r = r + 1
                 }
             }
-            win.text(n.text, ax + 14, ry + (rh - t.line()) / 2, _ink(self, ink, t), scale=t.scale, font=t.font)
+            tx := ax + 14
+            tx = self._draw_icon(win, t, n, tx, ry, rh)
+            win.text(n.text, tx, ry + (rh - t.line()) / 2, _ink(self, ink, t), scale=t.scale, font=t.font)
             i = i + 1
         }
         _clip_pop(win)
@@ -5716,6 +5849,216 @@ define _clear_hover(w: Widget) -> void {
 }
 
 ---
+The title bar of an `App(title_bar=true)`: the window's title, an optional
+widget on its left (`content`: a `MenuBar`, say), and minimize / maximize
+(restore) / close buttons on its right. Drawn by the program in its theme
+instead of the system's; dragging it moves the window (with the system's
+snapping), a double-click maximizes, and the window's edges still resize
+it. `app.title_bar` is it.
+---
+struct TitleBar : Widget {
+    win: window.Window
+    content: Widget          // shown on the left (null: none)
+    on_close: Callable       // the close button (default: close the window)
+    active: Bool             // the window has the keyboard focus (dimmed when not)
+    button_w: Int
+    _press: Int              // the button pressed (-1: none)
+
+    define __init(self, win: window.Window, content: Widget = null, on_close: Callable = null) -> void {
+        super().__init()
+        self.win = win
+        self.content = content
+        self.on_close = on_close
+        self.active = true
+        self.button_w = 46
+        self._press = -1
+        self.takes_clicks = true
+    }
+
+    define children(self) -> List {
+        if self.content == null { return [] }
+        return [self.content]
+    }
+
+    define access_role(self) -> String {
+        return "group"
+    }
+
+    define _a11y_name(self) -> String {
+        return self.win.title
+    }
+
+    define measure(self, t: Theme) -> void {
+        self.min_h = _max(32, t.line() + 14)
+        self.min_w = 3 * self.button_w + 40
+        if self.content != null {
+            self.content.measure(t)
+            self.min_w = self.min_w + self.content.min_w
+            self.min_h = _max(self.min_h, self.content.min_h)
+        }
+    }
+
+    define place(self, x: Int, y: Int, width: Int, height: Int) -> void {
+        self.x = x
+        self.y = y
+        self.width = width
+        self.height = height
+        if self.content != null {
+            self.content.place(x + 8, y + (height - self.content.min_h) / 2, self.content.min_w, self.content.min_h)
+        }
+    }
+
+    --- Where the buttons are: [x, y, width, height]. ---
+    define buttons_box(self) -> List {
+        return [self.x + self.width - 3 * self.button_w, self.y, 3 * self.button_w, self.height]
+    }
+
+    --- The button at (px, py): 0 minimize, 1 maximize / restore, 2 close, -1 none. ---
+    define button_at(self, px: Int, py: Int) -> Int {
+        left := self.x + self.width - 3 * self.button_w
+        if py < self.y or py >= self.y + self.height or px < left or px >= self.x + self.width { return -1 }
+        return _clamp((px - left) / self.button_w, 0, 2)
+    }
+
+    --- What a press here doesn't drag: the buttons and `content`. ---
+    define holes(self) -> List {
+        out := [self.buttons_box()]
+        if self.content != null and self.content.visible {
+            out.append([self.content.x, self.content.y, self.content.width, self.content.height])
+        }
+        return out
+    }
+
+    --- Press button `i` from code (0 minimize, 1 maximize / restore, 2 close). ---
+    define press(self, i: Int) -> void {
+        if i == 0 { self.win.minimize() }
+        if i == 1 {
+            if self.win.maximized() { self.win.restore() } else { self.win.maximize() }
+        }
+        if i == 2 {
+            if self.on_close != null { self.on_close() } else { self.win.close() }
+        }
+    }
+
+    define draw(self, win: window.Window, t: Theme) -> void {
+        bg := mix(t.background, t.surface, 60)
+        ink := self.active ? t.text : t.muted
+        win.rect(self.x, self.y, self.width, self.height, bg)
+        win.rect(self.x, self.y + self.height - 1, self.width, 1, t.border)
+        if self.content != null { self.content.draw(win, t) }
+        // The title, centred in the window; past the content if they'd meet.
+        title := self.win.title
+        tw := t.text_w(title)
+        left := self.content != null ? self.content.x + self.content.width + 16 : self.x + 12
+        right := self.x + self.width - 3 * self.button_w - 12
+        tx := self.x + (self.width - tw) / 2
+        if tx < left { tx = left }
+        if tx + tw > right { tx = _max(left, right - tw) }
+        _clip_push(win, left, self.y, _max(0, right - left), self.height)
+        win.text(title, tx, self.y + (self.height - t.line()) / 2, ink, scale=t.scale, font=t.font)
+        _clip_pop(win)
+        // The buttons: hovered one lit (close: red), pressed one darker.
+        hover := -1
+        if self.hovered or self._press >= 0 {
+            m := win.mouse()
+            hover = self.button_at(m.0, m.1)
+        }
+        i := 0
+        while i < 3 {
+            bx := self.x + self.width - (3 - i) * self.button_w
+            glyph := ink
+            if hover == i {
+                lit := i == 2 ? window.hex("#c42b1c") : mix(bg, t.text, 12)
+                if self._press == i { lit = i == 2 ? window.hex("#b22a1b") : mix(bg, t.text, 20) }
+                win.rect(bx, self.y, self.button_w, self.height - 1, lit)
+                if i == 2 { glyph = window.white() }
+            }
+            cx := bx + self.button_w / 2
+            cy := self.y + self.height / 2
+            if i == 0 { win.rect(cx - 5, cy, 10, 1, glyph) }
+            if i == 1 {
+                if self.win.maximized() {
+                    win.rect(cx - 5, cy - 3, 8, 8, glyph, fill=false)          // restore: two windows
+                    win.rect(cx - 3, cy - 5, 8, 1, glyph)
+                    win.rect(cx + 4, cy - 5, 1, 8, glyph)
+                } else {
+                    win.rect(cx - 5, cy - 5, 10, 10, glyph, fill=false)
+                }
+            }
+            if i == 2 {
+                win.line(cx - 5, cy - 5, cx + 5, cy + 5, glyph)
+                win.line(cx - 5, cy + 5, cx + 5, cy - 5, glyph)
+            }
+            i = i + 1
+        }
+    }
+
+    define handle(self, e: window.Event) -> Bool {
+        if e.kind == "mouse_down" and e.button == 1 {
+            self._press = self.button_at(e.x, e.y)
+            // A double-click on the bar itself (where the system didn't take it).
+            if self._press < 0 and e.clicks == 2 { self.press(1) }
+            return true
+        }
+        if e.kind == "mouse_up" and e.button == 1 {
+            was := self._press
+            self._press = -1
+            if was >= 0 and self.button_at(e.x, e.y) == was { self.press(was) }
+            return true
+        }
+        return false
+    }
+}
+
+// What an App with a title bar lays out: the bar on top, `body` (the
+// App's root) in the rest.
+struct _Frame : Widget {
+    bar: TitleBar
+    body: Widget
+
+    define __init(self, bar: TitleBar) -> void {
+        super().__init()
+        self.bar = bar
+        self.body = null
+    }
+
+    define children(self) -> List {
+        if self.body == null { return [self.bar] }
+        return [self.body, self.bar]
+    }
+
+    define access_role(self) -> String {
+        return "group"
+    }
+
+    define measure(self, t: Theme) -> void {
+        self.bar.measure(t)
+        self.min_w = self.bar.min_w
+        self.min_h = self.bar.min_h
+        if self.body != null {
+            self.body.measure(t)
+            self.min_w = _max(self.min_w, self.body.min_w)
+            self.min_h = self.min_h + self.body.min_h
+        }
+    }
+
+    define place(self, x: Int, y: Int, width: Int, height: Int) -> void {
+        self.x = x
+        self.y = y
+        self.width = width
+        self.height = height
+        bh := self.bar.min_h
+        self.bar.place(x, y, width, bh)
+        if self.body != null { self.body.place(x, y + bh, width, _max(0, height - bh)) }
+    }
+
+    define draw(self, win: window.Window, t: Theme) -> void {
+        if self.body != null { self.body.draw(win, t) }
+        self.bar.draw(win, t)
+    }
+}
+
+---
 A window showing a widget tree. Set `root`, then `run()`.
   `theme`     — colours (`ui.dark()` by default)
   `on_frame`  — optional `fn()` called once per frame before drawing
@@ -5914,10 +6257,20 @@ struct App {
     _pending: List           // events read while waiting (run), for the next step
     _drew: Bool              // the last step drew a frame
     _tip_shown: Bool         // the pending tooltip has been drawn
+    title_bar: TitleBar      // with `title_bar=true`: the program's own (else null)
+    _frame: _Frame
+    _hit_key: String         // the title bar's areas last told the window
 
-    define __init(self, title: String, width: Int, height: Int, theme: Theme = null, resizable: Bool = true, headless: Bool = false) -> void {
-        self.win = window.open(title, width, height, resizable=resizable, headless=headless)
+    define __init(self, title: String, width: Int, height: Int, theme: Theme = null, resizable: Bool = true, headless: Bool = false, title_bar: Bool = false) -> void {
+        self.win = window.open(title, width, height, resizable=resizable, headless=headless, borderless=title_bar)
         self.root = Column([])
+        self.title_bar = null
+        self._frame = null
+        self._hit_key = ""
+        if title_bar {
+            self.title_bar = TitleBar(self.win, on_close=fn() { self.close() })
+            self._frame = _Frame(self.title_bar)
+        }
         if theme == null {
             self.theme = dark()
         } else {
@@ -5964,13 +6317,13 @@ struct App {
     ---
     define accessibility(self) -> AccessNode {
         top := AccessNode("window", self.win.title, "", 0, 0, self.win.width(), self.win.height())
-        if self.win.is_open() and self.root != null {
-            rn := self.root.access_node()
+        if self.win.is_open() and self._tree() != null {
+            rn := self._tree().access_node()
             if rn != null { top.children.append(rn) }
             for pw in _popups {
                 pop: Widget = pw
                 pn := pop.access_node()
-                if pn != null and not (pop == self.root) { top.children.append(pn) }
+                if pn != null and not (pop == self._tree()) { top.children.append(pn) }
             }
         }
         if self.focus != null and self.focus.focused {
@@ -6228,8 +6581,8 @@ struct App {
     // Run the enabled menu item whose shortcut is `e`; true if one did.
     define _run_shortcut(self, e: window.Event) -> Bool {
         menus := []
-        self._shortcut_menus(self.root, menus)
-        for b in _all_menu_bars(self.root) {
+        self._shortcut_menus(self._tree(), menus)
+        for b in _all_menu_bars(self._tree()) {
             bar: MenuBar = b
             for m in bar.menus { menus.append(m) }
         }
@@ -6249,7 +6602,7 @@ struct App {
     // The innermost widget at (px, py) that something can be dropped on.
     define _drop_target(self, px: Int, py: Int) -> Widget {
         path := []
-        _path(self.root, px, py, path)
+        _path(self._tree(), px, py, path)
         i := path.length() - 1
         while i >= 0 {
             w: Widget = path[i]
@@ -6279,7 +6632,7 @@ struct App {
 
     define _cycle_focus(self, backwards: Bool) -> void {
         chain := []
-        _focus_chain(self.root, chain)
+        _focus_chain(self._tree(), chain)
         if chain.length() == 0 { return }
         idx := -1
         i := 0
@@ -6297,10 +6650,37 @@ struct App {
         self.focus_on(chain[next])
     }
 
+    // What's laid out and drawn: `root`, under the title bar if there's one.
+    define _tree(self) -> Widget {
+        if self._frame == null { return self.root }
+        self._frame.body = self.root
+        return self._frame
+    }
+
     --- Measure and place the tree to fill the window. ---
     define layout(self) -> void {
-        self.root.measure(self.theme)
-        self.root.place(0, 0, self.win.width(), self.win.height())
+        tree := self._tree()
+        tree.measure(self.theme)
+        if self.title_bar == null {
+            tree.place(0, 0, self.win.width(), self.win.height())
+        } else {
+            // Maximized on Windows, the window overhangs the screen: keep
+            // the bar (and the rest) inside what's visible.
+            m := self.win.inset()
+            l: Int = m[0]
+            tp: Int = m[1]
+            r: Int = m[2]
+            b: Int = m[3]
+            tree.place(l, tp, _max(0, self.win.width() - l - r), _max(0, self.win.height() - tp - b))
+            // Tell the window where the bar drags it (only when that moved).
+            bar := self.title_bar
+            holes := bar.holes()
+            key := String(bar.x) + "," + String(bar.y) + " " + String(bar.width) + "x" + String(bar.height) + String(holes)
+            if key != self._hit_key {
+                self._hit_key = key
+                self.win.set_hit_areas([[bar.x, bar.y, bar.width, bar.height]], holes)
+            }
+        }
     }
 
     --- Route one event to the widget it's for (also usable from tests). ---
@@ -6310,11 +6690,12 @@ struct App {
             self._access_do(e)
             return
         }
+        if self.title_bar != null and (k == "focus" or k == "blur") { self.title_bar.active = k == "focus" }
         if k == "mouse_move" or k == "mouse_down" or k == "mouse_up" or k == "wheel" or k == "key_down" or k == "blur" {
             if k == "mouse_move" {
                 self._mx = e.x
                 self._my = e.y
-                tip := _tip_at(self.root, e.x, e.y)
+                tip := _tip_at(self._tree(), e.x, e.y)
                 if tip != self._tip {
                     self._tip = tip
                     self._tip_since = window.ticks()
@@ -6333,12 +6714,12 @@ struct App {
                 py = self.win.mouse().1
             }
             if top.popup_contains(px, py) {
-                _clear_hover(self.root)
+                _clear_hover(self._tree())
                 top.popup_handle(e)
                 return
             }
             if k == "mouse_down" {
-                owner := _hit(self.root, e.x, e.y)
+                owner := _hit(self._tree(), e.x, e.y)
                 _close_popups()
                 // A click on the popup's own field just closes it.
                 if owner == top {
@@ -6384,8 +6765,8 @@ struct App {
         }
         if k == "mouse_up" { self._drag_src = null }
         if k == "mouse_move" {
-            _clear_hover(self.root)
-            over := _hit(self.root, e.x, e.y)
+            _clear_hover(self._tree())
+            over := _hit(self._tree(), e.x, e.y)
             if over != null { over.hovered = true }
             if self._capture != null { self._capture.handle(e) }
             return
@@ -6393,7 +6774,7 @@ struct App {
         // Right-click: the context menu of the innermost widget that has one.
         if k == "mouse_down" and e.button == 3 {
             path := []
-            _path(self.root, e.x, e.y, path)
+            _path(self._tree(), e.x, e.y, path)
             i := path.length() - 1
             while i >= 0 {
                 w: Widget = path[i]
@@ -6408,7 +6789,7 @@ struct App {
         }
         if k == "mouse_down" and e.button == 1 {
             path := []
-            _path(self.root, e.x, e.y, path)
+            _path(self._tree(), e.x, e.y, path)
             self._drag_src = null
             i := path.length() - 1
             while i >= 0 {
@@ -6423,7 +6804,7 @@ struct App {
             }
         }
         if k == "mouse_down" {
-            target := _hit(self.root, e.x, e.y)
+            target := _hit(self._tree(), e.x, e.y)
             if target != null and target.enabled {
                 if target.focusable { self.focus_on(target) }
                 self._capture = target
@@ -6451,7 +6832,7 @@ struct App {
                 mx = self._mx
                 my = self._my
             }
-            _path(self.root, mx, my, path)
+            _path(self._tree(), mx, my, path)
             i := path.length() - 1
             while i >= 0 {
                 w: Widget = path[i]
@@ -6484,7 +6865,7 @@ struct App {
             return
         }
         if k == "blur" {
-            _clear_hover(self.root)
+            _clear_hover(self._tree())
         }
     }
 
@@ -6558,7 +6939,7 @@ struct App {
         _clips.clear()
         self.win.unclip()
         self.win.clear(t.background)
-        self.root.draw(self.win, t)
+        self._tree().draw(self.win, t)
         if self._dragging {
             over := self._drop_target(self._mx, self._my)
             if over != null { self.win.rect(over.x - 2, over.y - 2, over.width + 4, over.height + 4, t.accent, fill=false) }

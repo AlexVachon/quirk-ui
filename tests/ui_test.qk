@@ -1873,3 +1873,89 @@ define test_frames_only_when_something_happened() -> void {
     test.assert_true(w >= 0 and w <= 530)          // a focused caret blinks
     app.close()
 }
+
+// A title bar of the program's own: root laid out under it, its buttons,
+// and the window told where it drags.
+define test_title_bar() -> void {
+    if not window.available() { return }
+    app := ui.App("My app", 500, 300, headless=true, title_bar=true)
+    test.assert_true(app.win.borderless())
+    b := ui.Button("OK")
+    app.root = ui.Column([b], padding=0)
+    app.layout()
+    bar := app.title_bar
+    test.assert_eq(bar.y, 0)
+    test.assert_eq(bar.width, 500)
+    test.assert_eq(b.y, bar.height)                              // root below the bar
+    test.assert_eq(app.win.hit_at(100, 10), "drag")
+    test.assert_eq(app.win.hit_at(480, 10), "")                  // the close button
+    test.assert_eq(app.win.hit_at(100, 150), "")
+    test.assert_eq(bar.button_at(500 - 10, 5), 2)
+    test.assert_eq(bar.button_at(500 - 46 * 3 + 2, 5), 0)
+    test.assert_eq(bar.button_at(100, 5), -1)
+    app.draw()                                                   // the title drawn in the bar
+    bg := app.win.pixel(20, bar.height / 2)
+    inked := 0
+    for yy in 6..bar.height - 6 {
+        for xx in 220..280 {
+            if app.win.pixel(xx, yy) != bg { inked = inked + 1 }
+        }
+    }
+    test.assert_true(inked > 10)
+    click_on(app, b)                                             // the root still gets clicks
+    test.assert_true(b.focused)
+    // A menu bar in it: not a drag area.
+    bar.content = ui.MenuBar(["File"], [ui.Menu([ui.MenuItem("Quit")])])
+    app.layout()
+    test.assert_eq(app.win.hit_at(bar.content.x + 4, 10), "")
+    // Close: the button, through on_close.
+    closed := []
+    bar.on_close = fn() { closed.append(1) }
+    click(app, 500 - 20, 10)
+    test.assert_eq(closed.length(), 1)
+    test.assert_true(app.is_open())
+    click(app, 500 - 20, 10)
+    bar.on_close = null
+    click(app, 500 - 20, 10)
+    test.assert_false(app.is_open())
+}
+
+// The side-bar look: a click opens a folder (on_expand first, to fill it),
+// rows from the top edge, a badge from `icon`.
+define test_tree_view_flat() -> void {
+    if not window.available() { return }
+    app := new_app()
+    folder := ui.TreeNode("src", [ui.TreeNode("…")])
+    file := ui.TreeNode("main.qk")
+    loads := []
+    tree := ui.TreeView([folder, file], flat=true, row_height=22, indent=12, guides=true,
+                        icon=fn(n) {
+                            node: ui.TreeNode = n
+                            return node.children.length() > 0 ? null : ["Q", window.hex("#a074c4")]
+                        },
+                        on_expand=fn(n) {
+                            node: ui.TreeNode = n
+                            loads.append(node.text)
+                            node.children.clear()
+                            node.add(ui.TreeNode("util.qk"))
+                        }, expand=true)
+    app.root = ui.Column([tree], padding=0, expand=true)
+    app.layout()
+    click(app, tree.x + 40, tree.y + 5)                         // row 0: the folder
+    test.assert_true(folder.expanded)
+    test.assert_eq(", ".join(loads), "src")
+    test.assert_eq(tree.visible_nodes().length(), 3)
+    click(app, tree.x + 40, tree.y + 22 + 5)                     // row 1: its child
+    sel: ui.TreeNode = tree.selected
+    test.assert_eq(sel.text, "util.qk")
+    click(app, tree.x + 40, tree.y + 5)                         // the folder again: closed
+    test.assert_false(folder.expanded)
+    test.assert_eq(loads.length(), 1)
+    test.assert_eq(tree.indent(), 12)
+    app.draw()                                                   // flat: no box, the badge drawn
+    test.assert_eq(app.win.pixel(tree.x + tree.width - 2, tree.y + tree.height - 2), app.win.pixel(tree.x + tree.width - 2, tree.y + tree.height - 3))
+    key(app, "right")                                            // keyboard opening: on_expand too
+    test.assert_true(folder.expanded)
+    test.assert_eq(loads.length(), 2)
+    app.close()
+}
