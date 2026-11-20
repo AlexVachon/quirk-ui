@@ -229,6 +229,7 @@ struct Widget {
     pressed: Bool
     tooltip: String
     takes_clicks: Bool
+    takes_tab: Bool          // Tab / Shift+Tab are its own keys (a code editor), not "next widget"
     context_menu: Menu
     on_drag: Callable
     on_drop: Callable
@@ -253,6 +254,7 @@ struct Widget {
         self.pressed = false
         self.tooltip = ""
         self.takes_clicks = false
+        self.takes_tab = false
         self.context_menu = null
         self.on_drag = null
         self.on_drop = null
@@ -284,6 +286,15 @@ struct Widget {
     }
 
     --- True while an input method is composing text in this widget (it gets every key). ---
+    ---
+    In how many ms it must be drawn again though nothing happened (a
+    blinking caret), -1 for never. The App redraws only when something
+    happened — an event, an animation — or when this says so.
+    ---
+    define next_redraw(self) -> Int {
+        return -1
+    }
+
     define composing(self) -> Bool {
         return false
     }
@@ -964,6 +975,12 @@ struct TextEdit : Widget {
         if self.has_selection() { out.append("has_selection") }
     }
 
+
+    // The caret blinks (every 530 ms) while it has the focus.
+    define next_redraw(self) -> Int {
+        if not self.focused { return -1 }
+        return 530 - window.ticks() % 530
+    }
 
     define __init(self, text: String = "", on_change: Callable = null) -> void {
         super().__init()
@@ -4475,15 +4492,23 @@ struct Dropdown : Widget {
 Pages under a row of tabs: `ui.Tabs(["General", "Advanced"], [page1, page2])`.
 Click a tab, or Left / Right when the tab row has the focus. `selected`
 is the page shown; `on_change(index, title)` runs when it changes;
-`add(title, page)` adds one.
+`add(title, page)` adds one, `close(i)` removes one.
+`closable=true` puts a × on each tab: clicking it (or middle-clicking the
+tab) calls `on_close(index)` — say, to ask about unsaved changes, then
+`close(index)` — or, without an `on_close`, closes the tab.
 ---
 struct Tabs : Widget {
     titles: List
     pages: List
     selected: Int
     on_change: Callable
+    closable: Bool           // a × on each tab
+    on_close: Callable       // on_close(index) when it's clicked (else the tab just closes)
     _tab_h: Int
     _xs: List
+    _mx: Int
+    _my: Int
+    _cw: Int
     define access_action(self, action: String, value: String, node: AccessNode) -> Bool {
         if action != "select" or node.index < 0 or not self.enabled { return false }
         self.select(node.index)
@@ -4521,16 +4546,45 @@ struct Tabs : Widget {
     }
 
 
-    define __init(self, titles: List, pages: List, selected: Int = 0, on_change: Callable = null, expand: Bool = false) -> void {
+    define __init(self, titles: List, pages: List, selected: Int = 0, on_change: Callable = null, expand: Bool = false,
+                  closable: Bool = false, on_close: Callable = null) -> void {
         super().__init()
         self.titles = titles
         self.pages = pages
         self.selected = _clamp(selected, 0, _max(0, pages.length() - 1))
         self.on_change = on_change
+        self.closable = closable
+        self.on_close = on_close
         self.expand = expand
         self._tab_h = 28
         self._xs = []
+        self._mx = -1
+        self._my = -1
+        self._cw = 8
         self.focusable = true
+    }
+
+    ---
+    Remove tab `i` (its title and page). The selection stays on the same
+    page when it can (the one after it when it's the one removed); runs
+    `on_change` when the page shown changes.
+    ---
+    define close(self, i: Int) -> void {
+        if i < 0 or i >= self.pages.length() { return }
+        shown := self.selected
+        self.titles.remove_at(i)
+        self.pages.remove_at(i)
+        n := self.pages.length()
+        if n == 0 {
+            self.selected = 0
+            return
+        }
+        if i < shown {
+            self.selected = shown - 1                       // the same page, one place left
+        } elif i == shown {
+            self.selected = _clamp(shown, 0, n - 1)         // the next one (or the new last)
+            if self.on_change != null { self.on_change(self.selected, self.titles[self.selected]) }
+        }
     }
 
     --- Add a page with its tab title. ---
@@ -4564,7 +4618,7 @@ struct Tabs : Widget {
     define measure(self, t: Theme) -> void {
         self._tab_h = t.line() + 12
         tw := 0
-        for title in self.titles { tw = tw + t.text_w(title.str()) + 3 * t.char_w() }
+        for title in self.titles { tw = tw + t.text_w(title.str()) + (self.closable ? 6 : 3) * t.char_w() }
         pw := 0
         ph := 0
         for pg in self.pages {
@@ -4586,6 +4640,14 @@ struct Tabs : Widget {
         if p != null { p.place(x + 8, y + self._tab_h + 8, width - 16, height - self._tab_h - 16) }
     }
 
+    // Is x on tab i's × (with the char width the last draw used)?
+    define _on_close_box(self, i: Int, px: Int) -> Bool {
+        if i + 1 >= self._xs.length() { return false }
+        b: Int = self._xs[i + 1]
+        size := self._cw * 2
+        return px >= b - size - 8 and px < b - 4
+    }
+
     // The tab under x, or -1.
     define _tab_at(self, px: Int) -> Int {
         i := 0
@@ -4600,10 +4662,20 @@ struct Tabs : Widget {
 
     define handle(self, e: window.Event) -> Bool {
         if not self.enabled { return false }
-        if e.kind == "mouse_down" and e.button == 1 {
+        if e.kind == "mouse_move" {
+            self._mx = e.x
+            self._my = e.y
+            return false
+        }
+        if e.kind == "mouse_down" and (e.button == 1 or e.button == 2) {
             if e.y < self.y + self._tab_h {
                 i := self._tab_at(e.x)
-                if i >= 0 { self.select(i) }
+                if i >= 0 and self.closable and (e.button == 2 or self._on_close_box(i, e.x)) {
+                    // The ×, or a middle click on the tab.
+                    if self.on_close != null { self.on_close(i) } else { self.close(i) }
+                    return true
+                }
+                if i >= 0 and e.button == 1 { self.select(i) }
             }
             return true
         }
@@ -4628,9 +4700,17 @@ struct Tabs : Widget {
         xs := [self.x]
         tx := self.x
         i := 0
+        self._cw = t.char_w()
+        if self.closable and self.hovered {
+            pointer := win.mouse()                      // (mouse_move goes to the App, not to widgets)
+            self._mx = pointer.0
+            self._my = pointer.1
+        } elif not self.hovered {
+            self._mx = -1
+        }
         while i < self.titles.length() {
             title := self.titles[i].str()
-            w := t.text_w(title) + 3 * t.char_w()
+            w := t.text_w(title) + (self.closable ? 6 : 3) * t.char_w()
             bg := t.background
             ink := t.muted
             if i == self.selected {
@@ -4645,8 +4725,21 @@ struct Tabs : Widget {
                 win.rect(tx + 1, self.y + th, w - 2, 1, t.surface)                 // open into the page
                 win.rect(tx, self.y, w, 2, _ink(self, t.accent, t))
             }
-            win.text(title, tx + (w - t.text_w(title)) / 2, self.y + (th - t.line()) / 2,
-                     _ink(self, ink, t), scale=t.scale, font=t.font)
+            if self.closable {
+                // The title on the left, the × on the right (brighter under the mouse).
+                win.text(title, tx + t.char_w() + t.char_w() / 2, self.y + (th - t.line()) / 2,
+                         _ink(self, ink, t), scale=t.scale, font=t.font)
+                size := t.char_w() * 2
+                bx := tx + w - size - 6
+                over := self._my >= self.y and self._my < self.y + th and self._mx >= bx - 2 and self._mx < tx + w - 4
+                if over { win.rect(bx - 2, self.y + (th - size) / 2, size + 4, size, mix(bg, t.text, 15)) }
+                xink := over ? t.text : (i == self.selected ? t.muted : mix(t.muted, bg, 30))
+                win.text("×", bx + (size - t.text_w("×")) / 2, self.y + (th - t.line()) / 2,
+                         _ink(self, xink, t), scale=t.scale, font=t.font)
+            } else {
+                win.text(title, tx + (w - t.text_w(title)) / 2, self.y + (th - t.line()) / 2,
+                         _ink(self, ink, t), scale=t.scale, font=t.font)
+            }
             tx = tx + w
             xs.append(tx)
             i = i + 1
@@ -5817,6 +5910,10 @@ struct App {
     _a11y_reported: Widget
     _a11y_focus_id: Int
     _a11y_sent_focus: Int
+    _dirty: Bool             // something changed since the last frame drawn
+    _pending: List           // events read while waiting (run), for the next step
+    _drew: Bool              // the last step drew a frame
+    _tip_shown: Bool         // the pending tooltip has been drawn
 
     define __init(self, title: String, width: Int, height: Int, theme: Theme = null, resizable: Bool = true, headless: Bool = false) -> void {
         self.win = window.open(title, width, height, resizable=resizable, headless=headless)
@@ -5827,6 +5924,10 @@ struct App {
             self.theme = theme
         }
         self.focus = null
+        self._dirty = true
+        self._pending = []
+        self._drew = false
+        self._tip_shown = false
         self.on_frame = null
         self.on_key = null
         self.tooltip_delay = 500
@@ -6374,7 +6475,7 @@ struct App {
             top: Widget = _popups[_popups.length() - 1]
             if top.popup_key(e) { return }
         }
-        if k == "key_down" and e.key == "tab" and not e.ctrl {
+        if k == "key_down" and e.key == "tab" and not e.ctrl and not (self.focus != null and self.focus.takes_tab) {
             self._cycle_focus(e.shift)
             return
         }
@@ -6388,21 +6489,67 @@ struct App {
     }
 
     --- One frame: handle events, lay out, draw, present. False once the window is closed. ---
-    define step(self) -> Bool {
-        for e in self.win.events() {
+    --- Draw again at the next frame — after changing widgets outside an event (a timer, a task). ---
+    define redraw(self) -> void {
+        self._dirty = true
+    }
+
+    ---
+    One frame: the events, then layout, draw and present. Called by
+    `run`, it draws only when something changed (`force=false`); called
+    yourself (tests, your own loop), it always draws.
+    ---
+    define step(self, force: Bool = true) -> Bool {
+        events := self._pending
+        self._pending = []
+        for e in self.win.events() { events.append(e) }
+        for ev in events {
+            e: window.Event = ev
             if not self.win.is_open() { return false }
             self.dispatch(e)
+            self._dirty = true
         }
         if not self.win.is_open() { return false }
+        if self._anims.length() > 0 { self._dirty = true }
         self._run_animations()
-        if self.on_frame != null { self.on_frame() }
+        if self.on_frame != null {
+            self.on_frame()
+            self._dirty = true                      // (it may have changed anything)
+        }
         if not self.win.is_open() { return false }
+        self._drew = false
+        if not force and not self._dirty { return true }
         self.layout()
         self.draw()
         self.win.present()
         self._a11y_sync()
         self._a11y_check()
+        self._dirty = false
+        self._drew = true
         return true
+    }
+
+    // In how many ms a frame is due though no event comes (-1: none): an
+    // animation now, a tooltip when its delay is over, a caret's blink.
+    define _next_wake(self) -> Int {
+        if self._anims.length() > 0 or self.on_frame != null { return 0 }
+        wake := -1
+        tip := self._tip
+        if tip != null and tip.visible and self._tip_since >= 0 {
+            left := self.tooltip_delay - (window.ticks() - self._tip_since)
+            if left > 0 {
+                wake = left
+                self._tip_shown = false
+            } elif not self._tip_shown {
+                self._tip_shown = true
+                wake = 0
+            }
+        }
+        if self.focus != null and self.focus.visible {
+            f := self.focus.next_redraw()
+            if f >= 0 and (wake < 0 or f < wake) { wake = f }
+        }
+        return wake
     }
 
     --- Draw the tree, open popups and the tooltip (what `step` shows). ---
@@ -6448,13 +6595,35 @@ struct App {
     }
 
     --- Run until the window closes, about `fps` frames a second. ---
+    ---
+    Run until the window closes. A frame is drawn when something happened
+    — input, a resize, an animation, a caret's blink, `redraw()` — at most
+    `fps` times a second; in between, it waits for the next event instead
+    of drawing the same picture again (a window that isn't touched costs
+    almost nothing, and input isn't held up behind frames nobody needs).
+    ---
     define run(self, fps: Int = 60) -> void {
         budget := 1000 / fps
         while self.is_open() {
             start := window.ticks()
-            if not self.step() { break }
-            left := budget - (window.ticks() - start)
-            if left > 0 { window.sleep(left) }
+            if not self.step(false) { break }
+            if not self.is_open() { break }
+            if self._drew {
+                left := budget - (window.ticks() - start)
+                if left > 0 { window.sleep(left) }       // (events that arrive meanwhile: one frame)
+                continue
+            }
+            wake := self._next_wake()
+            if wake == 0 {
+                self._dirty = true
+                continue
+            }
+            e := self.win.wait_event(wake < 0 ? 250 : wake)
+            if e != null {
+                self._pending.append(e)
+            } elif wake > 0 {
+                self._dirty = true                       // a timer's frame (blink, tooltip)
+            }
         }
     }
 }

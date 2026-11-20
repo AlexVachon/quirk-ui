@@ -695,6 +695,64 @@ define test_tabs_switch_pages() -> void {
     app.close()
 }
 
+// v1.11.0: a × on each tab (closable), close(i); takes_tab.
+define test_tabs_close_buttons() -> void {
+    if not window.available() { return }
+    app := new_app()
+    tabs := ui.Tabs(["A", "B", "C"], [ui.Label("a"), ui.Label("b"), ui.Label("c")], closable=true, expand=true)
+    app.root = ui.Column([tabs], padding=10, expand=true)
+    app.layout()
+    app.draw()
+    // The × of tab B: at the right end of its tab.
+    b_end: Int = tabs._xs[2]
+    mouse(app, "mouse_down", b_end - 12, tabs.y + 10)
+    mouse(app, "mouse_up", b_end - 12, tabs.y + 10)
+    test.assert_eq(", ".join(tabs.titles), "A, C")             // closed, without an on_close
+    test.assert_eq(tabs.selected, 0)
+    // Clicking the title (not the ×) selects, as before.
+    app.draw()
+    c_start: Int = tabs._xs[1]
+    mouse(app, "mouse_down", c_start + 6, tabs.y + 10)
+    mouse(app, "mouse_up", c_start + 6, tabs.y + 10)
+    test.assert_eq(tabs.selected, 1)
+    // close(i) before the shown page: the same page stays shown.
+    tabs.add("D", ui.Label("d"))
+    tabs.select(2)
+    tabs.close(0)
+    test.assert_eq(", ".join(tabs.titles), "C, D")
+    test.assert_eq(tabs.selected, 1)
+    // With on_close, the app decides (and a middle click counts).
+    asked := []
+    tabs.on_close = fn(i) { asked.append(i) }
+    app.draw()
+    first_mid: Int = tabs._xs[1]
+    m := ev("mouse_down")
+    m.x = first_mid / 2 + tabs.x / 2
+    m.y = tabs.y + 10
+    m.button = 2
+    app.dispatch(m)
+    test.assert_eq(asked.length(), 1)
+    test.assert_eq(Int(asked[0]), 0)
+    test.assert_eq(tabs.titles.length(), 2)                    // still there: on_close didn't close it
+    app.close()
+}
+
+define test_takes_tab_keeps_the_tab_key() -> void {
+    if not window.available() { return }
+    app := new_app()
+    area := ui.TextArea()
+    other := ui.Button("other")
+    area.takes_tab = true
+    app.root = ui.Column([area, other], padding=10)
+    app.layout()
+    app.focus_on(area)
+    keym(app, "tab")
+    test.assert_true(app.focus == area)                        // not moved to the next widget
+    area.takes_tab = false
+    keym(app, "tab")
+    test.assert_true(app.focus == other)
+}
+
 // ───── v1.3.0: menus, context menus, TreeView, Table ─────
 define right_click(app: ui.App, x: Int, y: Int) -> void {
     e := ev("mouse_down")
@@ -1784,5 +1842,34 @@ define test_accessibility_focus_goes_to_selected_item() -> void {
     app.focus_on(name)
     app.step()
     test.assert_eq(heard, ["focus"])
+    app.close()
+}
+
+// v1.11.0: run() draws a frame only when something happened.
+define test_frames_only_when_something_happened() -> void {
+    if not window.available() { return }
+    app := new_app()
+    app.root = ui.Column([ui.Button("one"), ui.TextInput()], padding=10)
+    app.step(false)
+    test.assert_true(app._drew)                    // the first frame
+    app.step(false)
+    test.assert_false(app._drew)                   // nothing happened: not drawn again
+    keym(app, "x")                                 // (dispatched directly: marks nothing by itself)
+    app.redraw()
+    app.step(false)
+    test.assert_true(app._drew)                    // redraw() asks for one
+    e := ev("mouse_move")
+    e.x = 20
+    e.y = 20
+    app._pending.append(e)
+    app.step(false)
+    test.assert_true(app._drew)                    // an event: drawn
+    app.step()
+    test.assert_true(app._drew)                    // step() called yourself: always drawn
+    test.assert_eq(app._next_wake(), -1)           // nothing blinks: wait for events
+    inp: ui.TextInput = app.root.children()[1]
+    app.focus_on(inp)
+    w := app._next_wake()
+    test.assert_true(w >= 0 and w <= 530)          // a focused caret blinks
     app.close()
 }
