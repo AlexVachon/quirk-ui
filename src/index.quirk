@@ -5843,6 +5843,13 @@ define _close_popups() -> void {
     }
 }
 
+define _list_has(items: List, x: Any) -> Bool {
+    for it in items {
+        if it == x { return true }
+    }
+    return false
+}
+
 define _clear_hover(w: Widget) -> void {
     w.hovered = false
     for c in w.children() { _clear_hover(c) }
@@ -6007,6 +6014,30 @@ struct TitleBar : Widget {
             return true
         }
         return false
+    }
+}
+
+---
+A timer from `app.every(ms, fn)` / `app.after(ms, fn)`: `fn()` runs on
+the App's loop, between frames. It doesn't draw a frame by itself: call
+`app.redraw()` in it when it changed something. `cancel()` stops it.
+---
+struct Timer {
+    interval: Int            // ms between runs (0: once)
+    action: Callable
+    due: Int                 // when it runs next (window.ticks())
+    active: Bool
+
+    define __init(self, interval: Int, action: Callable, due: Int) -> void {
+        self.interval = interval
+        self.action = action
+        self.due = due
+        self.active = true
+    }
+
+    --- Don't run it again. ---
+    define cancel(self) -> void {
+        self.active = false
     }
 }
 
@@ -6260,6 +6291,8 @@ struct App {
     title_bar: TitleBar      // with `title_bar=true`: the program's own (else null)
     _frame: _Frame
     _hit_key: String         // the title bar's areas last told the window
+    _timers: List
+    _wake_draws: Bool        // the wake _next_wake gave is for a frame (not just a timer)
 
     define __init(self, title: String, width: Int, height: Int, theme: Theme = null, resizable: Bool = true, headless: Bool = false, title_bar: Bool = false) -> void {
         self.win = window.open(title, width, height, resizable=resizable, headless=headless, borderless=title_bar)
@@ -6267,6 +6300,8 @@ struct App {
         self.title_bar = null
         self._frame = null
         self._hit_key = ""
+        self._timers = []
+        self._wake_draws = true
         if title_bar {
             self.title_bar = TitleBar(self.win, on_close=fn() { self.close() })
             self._frame = _Frame(self.title_bar)
@@ -6876,6 +6911,50 @@ struct App {
     }
 
     ---
+    Run `action()` every `ms` milliseconds while the App runs (polling
+    something: a process's output, a file). Returns the `Timer`.
+    @example app.every(50, fn() { term.poll() })
+    ---
+    define every(self, ms: Int, action: Callable) -> Timer {
+        t := Timer(_max(1, ms), action, window.ticks() + _max(1, ms))
+        self._timers.append(t)
+        return t
+    }
+
+    --- Run `action()` once, `ms` milliseconds from now. Returns the `Timer`. ---
+    define after(self, ms: Int, action: Callable) -> Timer {
+        t := Timer(0, action, window.ticks() + _max(0, ms))
+        self._timers.append(t)
+        return t
+    }
+
+    // The timers that are due: run (and the frame drawn); the done ones dropped.
+    define _run_timers(self) -> void {
+        if self._timers.length() == 0 { return }
+        now := window.ticks()
+        keep := []
+        for x in self._timers {
+            t: Timer = x
+            if not t.active { continue }
+            if now >= t.due {
+                t.action()
+                if t.interval > 0 and t.active {
+                    t.due = now + t.interval
+                } else {
+                    t.active = false
+                }
+            }
+            if t.active { keep.append(t) }
+        }
+        // (A timer added while they ran is in self._timers, not keep.)
+        for x in self._timers {
+            t: Timer = x
+            if t.active and not _list_has(keep, t) { keep.append(t) }
+        }
+        self._timers = keep
+    }
+
+    ---
     One frame: the events, then layout, draw and present. Called by
     `run`, it draws only when something changed (`force=false`); called
     yourself (tests, your own loop), it always draws.
@@ -6890,6 +6969,8 @@ struct App {
             self.dispatch(e)
             self._dirty = true
         }
+        if not self.win.is_open() { return false }
+        self._run_timers()
         if not self.win.is_open() { return false }
         if self._anims.length() > 0 { self._dirty = true }
         self._run_animations()
@@ -6913,7 +6994,10 @@ struct App {
     // In how many ms a frame is due though no event comes (-1: none): an
     // animation now, a tooltip when its delay is over, a caret's blink.
     define _next_wake(self) -> Int {
-        if self._anims.length() > 0 or self.on_frame != null { return 0 }
+        if self._anims.length() > 0 or self.on_frame != null {
+            self._wake_draws = true
+            return 0
+        }
         wake := -1
         tip := self._tip
         if tip != null and tip.visible and self._tip_since >= 0 {
@@ -6929,6 +7013,19 @@ struct App {
         if self.focus != null and self.focus.visible {
             f := self.focus.next_redraw()
             if f >= 0 and (wake < 0 or f < wake) { wake = f }
+        }
+        self._wake_draws = true
+        if self._timers.length() > 0 {
+            now := window.ticks()
+            for x in self._timers {
+                t: Timer = x
+                if not t.active { continue }
+                left := _max(0, t.due - now)
+                if wake < 0 or left < wake {
+                    wake = left
+                    self._wake_draws = false
+                }
+            }
         }
         return wake
     }
@@ -6996,14 +7093,14 @@ struct App {
             }
             wake := self._next_wake()
             if wake == 0 {
-                self._dirty = true
+                if self._wake_draws { self._dirty = true }
                 continue
             }
             e := self.win.wait_event(wake < 0 ? 250 : wake)
             if e != null {
                 self._pending.append(e)
-            } elif wake > 0 {
-                self._dirty = true                       // a timer's frame (blink, tooltip)
+            } elif wake > 0 and self._wake_draws {
+                self._dirty = true                       // a frame that's due (blink, tooltip)
             }
         }
     }

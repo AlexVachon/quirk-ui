@@ -1959,3 +1959,25 @@ define test_tree_view_flat() -> void {
     test.assert_eq(loads.length(), 2)
     app.close()
 }
+
+// Timers: run on the App's loop (step), every / after / cancel.
+define test_timers() -> void {
+    if not window.available() { return }
+    app := new_app()
+    ticks := []
+    once := []
+    t := app.every(1, fn() { ticks.append(1) })
+    app.after(0, fn() { once.append(1) })
+    window.sleep(5)
+    app.step()
+    window.sleep(5)
+    app.step()
+    test.assert_eq(ticks.length(), 2)
+    test.assert_eq(once.length(), 1)                             // after: once only
+    t.cancel()
+    window.sleep(5)
+    app.step()
+    test.assert_eq(ticks.length(), 2)
+    test.assert_true(app._next_wake() < 0)                       // nothing left to wake for
+    app.close()
+}
