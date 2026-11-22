@@ -2138,3 +2138,29 @@ define test_tooltip_at_a_point() -> void {
     test.assert_true(app._tip == null)
     app.close()
 }
+
+// ───── v1.15.0: shown-only shortcuts, a flat menu bar ─────
+define test_menu_shortcut_shown_only() -> void {
+    if not window.available() { return }
+    app := new_app()
+    ran := []
+    field := ui.TextInput("abc")
+    menu := ui.Menu([ui.MenuItem("Undo", on_click=fn() { ran.append("undo") }, shortcut="Ctrl+Z", bound=false),
+                     ui.MenuItem("Save", on_click=fn() { ran.append("save") }, shortcut="Ctrl+S")])
+    bar := ui.MenuBar(["Edit"], [menu], flat=true)
+    app.root = ui.Column([bar, field], padding=0)
+    app.layout()
+    click_on(app, field)
+    keym(app, "end")
+    typed(app, "d")
+    keym(app, "z", ctrl=true)                                    // the field's undo, not the menu's
+    test.assert_eq(ran.length(), 0)
+    test.assert_eq(field.text, "abc")
+    keym(app, "s", ctrl=true)                                    // bound: the menu's
+    test.assert_eq(ran, ["save"])
+    app.draw()                                                   // (flat: no bar drawn of its own)
+    undo: ui.MenuItem = menu.items[0]
+    undo.on_click()
+    test.assert_eq(ran, ["save", "undo"])
+    app.close()
+}

@@ -57,7 +57,11 @@ Click a title (or move over another while one is open); Up / Down /
 Enter / Escape, Left / Right between menus. A `shortcut` ("Ctrl+S",
 "Ctrl+Shift+N", "F5", "Delete"; Ctrl is also Cmd) runs its item from
 anywhere in the window — menu bar items always, a right-click menu's
-while its widget has the focus. `app.on_key` sees every key first. Any widget can have a right-click menu:
+while its widget has the focus. `app.on_key` sees every key first.
+`MenuItem(..., bound=false)` only shows its shortcut (the focused widget
+handles that key itself — Ctrl+Z in an editor, not the menu).
+`MenuBar(titles, menus, flat=true)` draws no bar of its own (for
+`app.title_bar.content`): a title is lit when hovered or open. Any widget can have a right-click menu:
 `widget.context_menu = ui.Menu([...])`; `menu.open_at(x, y)` opens one
 from code.
 

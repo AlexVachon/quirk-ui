@@ -4909,12 +4909,14 @@ struct MenuItem {
     on_click: Callable
     shortcut: String
     enabled: Bool
+    bound: Bool              // false: the shortcut is only shown (the focused widget handles that key)
 
-    define __init(self, text: String, on_click: Callable = null, shortcut: String = "", enabled: Bool = true) -> void {
+    define __init(self, text: String, on_click: Callable = null, shortcut: String = "", enabled: Bool = true, bound: Bool = true) -> void {
         self.text = text
         self.on_click = on_click
         self.shortcut = shortcut
         self.enabled = enabled
+        self.bound = bound
     }
 
     --- True for a separator line. ---
@@ -4924,7 +4926,7 @@ struct MenuItem {
 
     --- True when key event `e` is this item's `shortcut` ("Ctrl+S", "Ctrl+Shift+N", "F5", "Delete"; Ctrl also matches Cmd). ---
     define matches(self, e: window.Event) -> Bool {
-        if self.shortcut.length() == 0 or e.kind != "key_down" { return false }
+        if self.shortcut.length() == 0 or e.kind != "key_down" or not self.bound { return false }
         parts := self.shortcut.split("+")
         ctrl := false
         shift := false
@@ -5182,6 +5184,7 @@ Right) switches to it.
 struct MenuBar : Widget {
     titles: List
     menus: List
+    flat: Bool               // no bar of its own (in a TitleBar): titles lit when hovered / open
     _open: Int
     _xs: List
     define access_action(self, action: String, value: String, node: AccessNode) -> Bool {
@@ -5217,10 +5220,11 @@ struct MenuBar : Widget {
     }
 
 
-    define __init(self, titles: List, menus: List) -> void {
+    define __init(self, titles: List, menus: List, flat: Bool = false) -> void {
         super().__init()
         self.titles = titles
         self.menus = menus
+        self.flat = flat
         self._open = -1
         self._xs = []
         self.takes_clicks = true
@@ -5299,8 +5303,15 @@ struct MenuBar : Widget {
     }
 
     define draw(self, win: window.Window, t: Theme) -> void {
-        win.rect(self.x, self.y, self.width, self.height, t.surface)
-        win.rect(self.x, self.y + self.height - 1, self.width, 1, t.border)
+        if not self.flat {
+            win.rect(self.x, self.y, self.width, self.height, t.surface)
+            win.rect(self.x, self.y + self.height - 1, self.width, 1, t.border)
+        }
+        hover := -1
+        if self.flat and self.hovered and self._xs.length() > 0 {
+            m := win.mouse()
+            if m.1 >= self.y and m.1 < self.y + self.height { hover = self._title_at(m.0) }
+        }
         xs := [self.x]
         tx := self.x
         i := 0
@@ -5308,7 +5319,11 @@ struct MenuBar : Widget {
             title := self.titles[i].str()
             w := t.text_w(title) + 2 * t.char_w()
             ink := t.text
-            if i == self._open {
+            if self.flat {
+                if i == self._open or i == hover {
+                    win.rect(tx, self.y + 3, w, self.height - 6, mix(t.surface, t.text, i == self._open ? 18 : 10))
+                }
+            } elif i == self._open {
                 win.rect(tx, self.y, w, self.height - 1, t.accent)
                 ink = t.accent_text
             }
