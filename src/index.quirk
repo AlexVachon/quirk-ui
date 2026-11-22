@@ -519,6 +519,8 @@ define _clip_pop(win: window.Window) -> void {
 
 // Open popups (Dropdown lists), topmost last.
 _popups := []
+// Where the title bar ends (y), for popups placed under it (Palette); 0 without one.
+_bar_bottom := [0]
 
 // Selection highlight colour.
 define _sel_color(w: Widget, t: Theme) -> Int {
@@ -5618,6 +5620,354 @@ struct FileDialog : Widget {
     }
 }
 
+// ===== Palette =====
+
+---
+A row of a `Palette`: its `label`, a muted `detail` after it (a file's
+folder), a `hint` on the right (a shortcut), any `data`. `marks` /
+`detail_marks` are character indices drawn in the accent colour — the
+letters a fuzzy match found.
+---
+struct PaletteItem {
+    label: String
+    detail: String
+    hint: String
+    data: Any
+    marks: List
+    detail_marks: List
+
+    define __init(self, label: String, detail: String = "", hint: String = "", data: Any = null, marks: List = null, detail_marks: List = null) -> void {
+        self.label = label
+        self.detail = detail
+        self.hint = hint
+        self.data = data
+        self.marks = marks != null ? marks : []
+        self.detail_marks = detail_marks != null ? detail_marks : []
+    }
+
+    define __str(self) -> String {
+        return self.label
+    }
+}
+
+---
+A command palette / quick open: a search field over a list, at the top of
+the window (under the title bar). `on_query(text) -> List` gives the rows
+for what's typed — `PaletteItem`s, or anything with `.str()`; Enter or a
+click runs `on_pick(item)`, Escape or a click outside closes it
+(`on_cancel()`). Up / Down (wrapping), Page Up / Page Down, Home / End
+(with Ctrl) move. `show(text)` opens it with `text` typed.
+
+    p := ui.Palette(on_query=fn(q) { return rows_for(q) }, on_pick=fn(it) { run(it) },
+                    placeholder="Type a command")
+    p.show()        // e.g. from Ctrl+Shift+P
+---
+struct Palette : Widget {
+    placeholder: String
+    on_query: Callable
+    on_pick: Callable
+    on_cancel: Callable
+    rows: Int                // rows shown at most
+    max_width: Int           // the panel's width at most (px)
+    empty_text: String       // shown when nothing matches
+    items: List              // the rows for the text typed
+    selected: Int
+    is_open: Bool
+    input: TextInput
+    _top: Int                // first row shown
+    _px: Int
+    _py: Int
+    _pw: Int
+    _ph: Int
+    _ly: Int                 // where the rows start
+    _rh: Int
+    _shown: Int              // rows that fit (the window may be short)
+
+    define __init(self, on_query: Callable = null, on_pick: Callable = null, placeholder: String = "", on_cancel: Callable = null, rows: Int = 12, max_width: Int = 600) -> void {
+        super().__init()
+        self.placeholder = placeholder
+        self.on_query = on_query
+        self.on_pick = on_pick
+        self.on_cancel = on_cancel
+        self.rows = rows
+        self.max_width = max_width
+        self.empty_text = "No matching results"
+        self.items = []
+        self.selected = -1
+        self.is_open = false
+        self.input = TextInput("", placeholder=placeholder, columns=40)
+        self._top = 0
+        self._px = 0
+        self._py = 0
+        self._pw = 0
+        self._ph = 0
+        self._ly = 0
+        self._rh = 0
+        self._shown = rows
+    }
+
+    define access_role(self) -> String {
+        return "dialog"
+    }
+
+    define _a11y_name(self) -> String {
+        return self.placeholder
+    }
+
+    define access_value(self) -> String {
+        return self.input.text
+    }
+
+    --- Open it with `text` typed (the cursor after it), the rows for it listed. ---
+    define show(self, text: String = "") -> void {
+        _close_popups()
+        self.input.placeholder = self.placeholder
+        self.input.text = text
+        self.input.cursor = text.length()
+        self.input.anchor = self.input.cursor
+        self.input.focused = true
+        self.is_open = true
+        _popups.append(self)
+        self.refresh()
+    }
+
+    --- The text typed. ---
+    define query(self) -> String {
+        return self.input.text
+    }
+
+    --- Ask `on_query` for the rows again (the first one selected). ---
+    define refresh(self) -> void {
+        got: List = []
+        if self.on_query != null {
+            r := self.on_query(self.input.text)
+            if r != null { got = r }
+        }
+        self.items = got
+        self._top = 0
+        self.selected = got.length() > 0 ? 0 : -1
+    }
+
+    --- Close it without picking. ---
+    define cancel(self) -> void {
+        if not self.is_open { return }
+        self.close_popup()
+        if self.on_cancel != null { self.on_cancel() }
+    }
+
+    define close_popup(self) -> void {
+        if not self.is_open { return }
+        self.is_open = false
+        self.input.focused = false
+        keep := []
+        for o in _popups {
+            w: Widget = o
+            if w != self { keep.append(w) }
+        }
+        _popups.clear()
+        for w in keep { _popups.append(w) }
+    }
+
+    --- Pick row `i` (the selected one by default): close, then `on_pick(item)`. ---
+    define pick(self, i: Int = -1) -> void {
+        at := i >= 0 ? i : self.selected
+        if at < 0 or at >= self.items.length() { return }
+        it := self.items[at]
+        self.close_popup()
+        if self.on_pick != null { self.on_pick(it) }
+    }
+
+    --- Select row `i` (kept on screen). ---
+    define select(self, i: Int) -> void {
+        n := self.items.length()
+        if n == 0 {
+            self.selected = -1
+            return
+        }
+        self.selected = _clamp(i, 0, n - 1)
+        vis := _max(1, _min(self.rows, self._shown))
+        if self.selected < self._top { self._top = self.selected }
+        if self.selected >= self._top + vis { self._top = self.selected - vis + 1 }
+    }
+
+    define next_redraw(self) -> Int {
+        return self.input.next_redraw()      // the caret blinks
+    }
+
+    define _row_at(self, px: Int, py: Int) -> Int {
+        if self._rh <= 0 or px < self._px or px >= self._px + self._pw or py < self._ly { return -1 }
+        i := self._top + (py - self._ly) / self._rh
+        if i >= self.items.length() or i >= self._top + self._shown { return -1 }
+        return i
+    }
+
+    define popup_contains(self, px: Int, py: Int) -> Bool {
+        return true                           // a click outside closes it (below)
+    }
+
+    define popup_handle(self, e: window.Event) -> Bool {
+        inside := e.x >= self._px and e.x < self._px + self._pw and e.y >= self._py and e.y < self._py + self._ph
+        if e.kind == "mouse_down" and not inside and not self.input._dragging {
+            self.cancel()
+            return true
+        }
+        if self.input.contains(e.x, e.y) or self.input._dragging {
+            before := self.input.text
+            self.input.handle(e)
+            if self.input.text != before { self.refresh() }
+            return true
+        }
+        if e.kind == "wheel" {
+            n := self.items.length()
+            self._top = _clamp(self._top - e.dy * 3, 0, _max(0, n - self._shown))
+            return true
+        }
+        i := self._row_at(e.x, e.y)
+        if e.kind == "mouse_move" and i >= 0 { self.selected = i }
+        if e.kind == "mouse_down" and e.button == 1 and i >= 0 {
+            self.selected = i
+            self.pick(i)
+        }
+        return true
+    }
+
+    define popup_key(self, e: window.Event) -> Bool {
+        if e.kind == "key_down" {
+            k := e.key
+            n := self.items.length()
+            if k == "escape" {
+                self.cancel()
+                return true
+            }
+            if k == "return" or k == "keypad_enter" {
+                self.pick()
+                return true
+            }
+            if k == "up" or k == "down" {
+                if n > 0 {
+                    step := k == "up" ? n - 1 : 1
+                    self.select(self.selected < 0 ? 0 : (self.selected + step) % n)
+                }
+                return true
+            }
+            if k == "pageup" {
+                self.select(self.selected - self.rows)
+                return true
+            }
+            if k == "pagedown" {
+                self.select(self.selected + self.rows)
+                return true
+            }
+            if (k == "home" or k == "end") and e.ctrl {
+                self.select(k == "home" ? 0 : n - 1)
+                return true
+            }
+            if k == "tab" { return true }
+        }
+        before := self.input.text
+        self.input.handle(e)
+        if self.input.text != before { self.refresh() }
+        return true
+    }
+
+    // Text with the characters at `marks` in `hi` (the rest in `ink`), from x; its width.
+    define _marked(self, win: window.Window, t: Theme, s: String, marks: List, x: Int, y: Int, ink: Int, hi: Int) -> Int {
+        if marks.length() == 0 {
+            win.text(s, x, y, ink, scale=t.scale, font=t.font)
+            return t.text_w(s)
+        }
+        on := {}
+        for m in marks { on[String(m)] = true }
+        n := s.length()
+        start := 0
+        cur := on.has("0")
+        i := 1
+        while i <= n {
+            here := i < n and on.has(String(i))
+            if i == n or here != cur {
+                piece := s.substring(start, i)
+                px := x + t.text_w(s.substring(0, start))
+                win.text(piece, px, y, cur ? hi : ink, scale=t.scale, font=t.font)
+                if cur { win.text(piece, px + 1, y, hi, scale=t.scale, font=t.font) }     // (bold)
+                start = i
+                cur = here
+            }
+            i = i + 1
+        }
+        return t.text_w(s)
+    }
+
+    define draw_popup(self, win: window.Window, t: Theme) -> void {
+        lh := t.line()
+        cw := t.char_w()
+        self._rh = lh + 8
+        self._pw = _min(win.width() - 16, self.max_width)
+        self._px = (win.width() - self._pw) / 2
+        self._py = _bar_bottom[0] + 6
+        n := self.items.length()
+        shown := _min(n, self.rows)
+        if n == 0 { shown = 1 }
+        room := win.height() - self._py - 8 - (lh + 12) - 16
+        if room > 0 and shown * self._rh > room { shown = _max(1, room / self._rh) }
+        self._shown = shown
+        self._ph = 8 + lh + 12 + 8 + shown * self._rh + 6
+        x := self._px
+        y := self._py
+        w := self._pw
+        win.rect(x + 3, y + 4, w, self._ph, mix(t.background, window.black(), 55))
+        win.rect(x, y, w, self._ph, t.surface)
+        win.rect(x, y, w, self._ph, t.border, fill=false)
+        self.input.measure(t)
+        self.input.focused = true
+        self.input.place(x + 8, y + 8, w - 16, lh + 12)
+        self.input.draw(win, t)
+        self._ly = y + 8 + lh + 12 + 8
+        if n == 0 {
+            win.text(self.empty_text, x + 2 * cw, self._ly + (self._rh - lh) / 2, t.muted, scale=t.scale, font=t.font)
+            return
+        }
+        hi := mix(t.accent, t.text, 35)
+        sel_bg := mix(t.accent, t.surface, 60)
+        i := self._top
+        ry := self._ly
+        while i < n and i < self._top + shown {
+            v := self.items[i]
+            ty := ry + (self._rh - lh) / 2
+            if i == self.selected { win.rect(x + 4, ry, w - 8, self._rh, sel_bg) }
+            lx := x + 2 * cw
+            right := x + w - 2 * cw
+            if v != null and type(v) == "PaletteItem" {
+                it: PaletteItem = v
+                if it.hint.length() > 0 {
+                    hw := t.text_w(it.hint)
+                    right = right - hw
+                    win.text(it.hint, right, ty, t.muted, scale=t.scale, font=t.font)
+                    right = right - 2 * cw
+                }
+                label := t.fit(it.label, right - lx)
+                lw := self._marked(win, t, label, it.marks, lx, ty, t.text, hi)
+                if it.detail.length() > 0 and lx + lw + 2 * cw < right {
+                    dx := lx + lw + cw
+                    detail := t.fit(it.detail, right - dx)
+                    self._marked(win, t, detail, it.detail_marks, dx, ty, t.muted, hi)
+                }
+            } else {
+                label := v == null ? "None" : v.str()
+                win.text(t.fit(label, right - lx), lx, ty, t.text, scale=t.scale, font=t.font)
+            }
+            ry = ry + self._rh
+            i = i + 1
+        }
+        if n > shown {
+            // A scroll thumb on the right.
+            track := shown * self._rh
+            th := _max(12, track * shown / n)
+            ty := self._ly + (track - th) * self._top / _max(1, n - shown)
+            win.rect(x + w - 6, ty, 3, th, mix(t.muted, t.surface, 40))
+        }
+    }
+}
+
 // Every visible MenuBar in the tree.
 define _all_menu_bars(w: Widget) -> List {
     out := []
@@ -5910,6 +6260,7 @@ struct TitleBar : Widget {
         self.y = y
         self.width = width
         self.height = height
+        _bar_bottom[0] = y + height
         if self.content != null {
             self.content.place(x + 8, y + (height - self.content.min_h) / 2, self.content.min_w, self.content.min_h)
         }
@@ -7018,6 +7369,11 @@ struct App {
         }
         if self.focus != null and self.focus.visible {
             f := self.focus.next_redraw()
+            if f >= 0 and (wake < 0 or f < wake) { wake = f }
+        }
+        if _popups.length() > 0 {
+            top: Widget = _popups[_popups.length() - 1]
+            f := top.next_redraw()
             if f >= 0 and (wake < 0 or f < wake) { wake = f }
         }
         self._wake_draws = true

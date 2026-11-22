@@ -120,6 +120,23 @@ ui.FileDialog(mode="open", dir=".", filter="*.qk", on_pick=fn(path) { load(path)
 it takes all input: double-click / Enter opens a folder or picks a file,
 Backspace goes up, Escape cancels (`on_cancel`).
 
+A command palette / quick open — a search field over a list at the top of
+the window, under the title bar:
+
+```quirk
+pal := ui.Palette(on_query=fn(q) { return rows_for(q) }, on_pick=fn(it) { run(it) },
+                  placeholder="Type a command")
+pal.show()                    // or pal.show(">") with text typed
+```
+
+`on_query(text)` gives the rows for what's typed, each time it changes:
+`ui.PaletteItem(label, detail="", hint="", data=null, marks=[], detail_marks=[])`
+(a muted detail after the label, a hint such as a shortcut on the right,
+`marks` the character indices drawn bold in the accent colour — what a
+fuzzy matcher found), or any value with `.str()`. Up / Down (wrapping), Page
+Up / Down, Ctrl+Home / End move; Enter or a click picks (`on_pick(item)`);
+Escape or a click outside closes (`on_cancel`).
+
 Any widget can be dragged onto another: `card.on_drag = fn() => card_id`
 makes it draggable (return `null` to refuse), `bin.on_drop = fn(data) {
 ... }` accepts drops. A label follows the mouse and the target under it is

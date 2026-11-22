@@ -2000,3 +2000,113 @@ define test_on_key_can_keep_the_key() -> void {
     test.assert_eq(field.text, "ab")
     app.close()
 }
+
+// ───── v1.13.0: Palette (command palette / quick open) ─────
+define test_palette_query_keys_pick() -> void {
+    if not window.available() { return }
+    app := new_app()
+    field := ui.TextInput("behind")
+    app.root = ui.Column([field], padding=8)
+    app.layout()
+    click_on(app, field)
+    words := ["apple", "banana", "cherry", "avocado"]
+    queries := []
+    picked := []
+    cancelled := []
+    pal := ui.Palette(on_query=fn(q) {
+        queries.append(q)
+        out := []
+        for w in words {
+            s: String = w
+            if s.find(String(q)) >= 0 {
+                at := s.find(String(q))
+                marks := []
+                k := 0
+                while k < String(q).length() {
+                    marks.append(at + k)
+                    k = k + 1
+                }
+                out.append(ui.PaletteItem(s, detail="fruit", hint="F" + String(out.length() + 1), data=s, marks=marks))
+            }
+        }
+        return out
+    }, on_pick=fn(it) {
+        item: ui.PaletteItem = it
+        picked.append(item.data)
+    }, on_cancel=fn() { cancelled.append(true) }, placeholder="Find a fruit")
+    pal.show()
+    test.assert_true(pal.is_open)
+    test.assert_eq(pal.items.length(), 4)
+    test.assert_eq(pal.selected, 0)
+    app.draw()
+    typed(app, "a")                                              // goes to the palette, not the field
+    test.assert_eq(field.text, "behind")
+    test.assert_eq(pal.query(), "a")
+    test.assert_eq(pal.items.length(), 3)                        // apple, banana, avocado
+    keym(app, "up")                                              // wraps to the last
+    test.assert_eq(pal.selected, 2)
+    keym(app, "down")
+    test.assert_eq(pal.selected, 0)
+    keym(app, "down")
+    keym(app, "return")
+    test.assert_eq(picked, ["banana"])
+    test.assert_true(not pal.is_open)
+    // Typed keys reach the field again once it's closed.
+    typed(app, "!")
+    test.assert_eq(field.text, "behind!")
+    // Open with text; nothing matches; Escape cancels.
+    pal.show("zz")
+    test.assert_eq(pal.items.length(), 0)
+    test.assert_eq(pal.selected, -1)
+    app.draw()
+    keym(app, "return")                                          // nothing to pick
+    test.assert_true(pal.is_open)
+    keym(app, "backspace")
+    keym(app, "backspace")
+    test.assert_eq(pal.items.length(), 4)
+    keym(app, "escape")
+    test.assert_true(not pal.is_open)
+    test.assert_eq(cancelled.length(), 1)
+    // A click on a row picks it; a click outside closes.
+    pal.show()
+    app.draw()
+    mouse(app, "mouse_move", pal._px + 20, pal._ly + pal._rh * 2 + 2)
+    test.assert_eq(pal.selected, 2)
+    mouse(app, "mouse_down", pal._px + 20, pal._ly + pal._rh * 2 + 2)
+    test.assert_eq(picked, ["banana", "cherry"])
+    pal.show()
+    app.draw()
+    mouse(app, "mouse_down", 2, app.win.height() - 2)
+    test.assert_true(not pal.is_open)
+    test.assert_eq(cancelled.length(), 2)
+    app.close()
+}
+
+define test_palette_scrolls_and_strings() -> void {
+    if not window.available() { return }
+    app := new_app()
+    app.root = ui.Column([ui.Label("x")], padding=8)
+    app.layout()
+    many := []
+    i := 0
+    while i < 40 {
+        many.append("item " + String(i))
+        i = i + 1
+    }
+    got := []
+    pal := ui.Palette(on_query=fn(q) { return many }, on_pick=fn(it) { got.append(String(it)) }, rows=5)
+    pal.show()
+    app.draw()
+    keym(app, "pagedown")
+    test.assert_eq(pal.selected, 5)
+    test.assert_true(pal._top > 0)
+    keym(app, "end", ctrl=true)
+    test.assert_eq(pal.selected, 39)
+    test.assert_eq(pal._top, 35)
+    keym(app, "down")                                            // wraps to the top
+    test.assert_eq(pal.selected, 0)
+    test.assert_eq(pal._top, 0)
+    keym(app, "return")
+    test.assert_eq(got, ["item 0"])
+    app.close()
+}
