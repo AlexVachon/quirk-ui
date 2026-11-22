@@ -154,6 +154,9 @@ From code: `field.selected_text()`, `field.select(start, end)`,
 Tooltips: set `widget.tooltip = "Hint"`, or inline:
 `ui.tooltip(ui.Button("Save", on_click=save), "Write the file")`.
 `app.tooltip_delay` (ms, default 500) is how long the mouse rests first.
+A widget whose parts say different things overrides
+`tooltip_at(px, py) -> String` ("" for none there) — a code editor's error
+under the mouse; a new text waits the delay again.
 
 ## Layout
 

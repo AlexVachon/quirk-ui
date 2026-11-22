@@ -422,6 +422,15 @@ struct Widget {
         return []
     }
 
+    ---
+    The tooltip for the point (px, py) — `tooltip` by default. A widget
+    whose parts say different things (a code editor's error marks, a
+    table's cells) overrides it; "" for none there.
+    ---
+    define tooltip_at(self, px: Int, py: Int) -> String {
+        return self.tooltip
+    }
+
     --- True if (px, py) is inside the widget's box. ---
     define contains(self, px: Int, py: Int) -> Bool {
         return px >= self.x and py >= self.y and px < self.x + self.width and py < self.y + self.height
@@ -6176,7 +6185,7 @@ define _tip_at(w: Widget, px: Int, py: Int) -> Widget {
     i := path.length() - 1
     while i >= 0 {
         c: Widget = path[i]
-        if c.tooltip.length() > 0 { return c }
+        if c.tooltip_at(px, py).length() > 0 { return c }
         i = i - 1
     }
     return null
@@ -6619,6 +6628,7 @@ struct App {
     _capture: Widget
     _tip: Widget
     _tip_since: Int
+    _tip_text: String        // what the tooltip says (a new text waits the delay again)
     _mx: Int
     _my: Int
     _drag_src: Widget
@@ -6673,6 +6683,7 @@ struct App {
         self.tooltip_delay = 500
         self._capture = null
         self._tip = null
+        self._tip_text = ""
         self._tip_since = 0
         self._mx = -1
         self._my = -1
@@ -7083,8 +7094,10 @@ struct App {
                 self._mx = e.x
                 self._my = e.y
                 tip := _tip_at(self._tree(), e.x, e.y)
-                if tip != self._tip {
+                text := tip != null ? tip.tooltip_at(e.x, e.y) : ""
+                if tip != self._tip or text != self._tip_text {
                     self._tip = tip
+                    self._tip_text = text
                     self._tip_since = window.ticks()
                 }
             } else {
@@ -7417,7 +7430,7 @@ struct App {
         tip := self._tip
         if tip != null {
             if tip.visible and self._tip_since >= 0 and window.ticks() - self._tip_since >= self.tooltip_delay {
-                self._draw_tip(tip.tooltip)
+                self._draw_tip(self._tip_text)
             }
         }
     }

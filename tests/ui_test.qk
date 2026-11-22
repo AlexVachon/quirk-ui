@@ -2110,3 +2110,31 @@ define test_palette_scrolls_and_strings() -> void {
     test.assert_eq(got, ["item 0"])
     app.close()
 }
+
+// ───── v1.14.0: tooltips that depend on where the mouse is ─────
+struct Halves : ui.Widget {
+    define __init(self) -> void {
+        super().__init()
+        self.min_w = 100
+        self.min_h = 20
+    }
+
+    define tooltip_at(self, px: Int, py: Int) -> String {
+        return px < self.x + self.width / 2 ? "left" : ""
+    }
+}
+
+define test_tooltip_at_a_point() -> void {
+    if not window.available() { return }
+    app := new_app()
+    h := Halves()
+    app.root = ui.Row([h, ui.Spacer()], padding=0)
+    app.layout()
+    app.tooltip_delay = 0
+    mouse(app, "mouse_move", h.x + 5, h.y + 5)
+    test.assert_eq(app._tip_text, "left")
+    test.assert_true(app._tip == h)
+    mouse(app, "mouse_move", h.x + h.width - 5, h.y + 5)       // "" there: no tooltip
+    test.assert_true(app._tip == null)
+    app.close()
+}
