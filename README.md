@@ -60,6 +60,8 @@ anywhere in the window — menu bar items always, a right-click menu's
 while its widget has the focus. `app.on_key` sees every key first.
 `MenuItem(..., bound=false)` only shows its shortcut (the focused widget
 handles that key itself — Ctrl+Z in an editor, not the menu).
+A right-click on a `TreeView` / `ListView` row selects it (without
+`on_select`) before its widget's `context_menu` opens; `tree.node_at(x, y)`.
 `MenuBar(titles, menus, flat=true)` draws no bar of its own (for
 `app.title_bar.content`): a title is lit when hovered or open. Any widget can have a right-click menu:
 `widget.context_menu = ui.Menu([...])`; `menu.open_at(x, y)` opens one

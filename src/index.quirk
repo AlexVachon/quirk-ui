@@ -2350,6 +2350,11 @@ struct ListView : Widget {
 
     define handle(self, e: window.Event) -> Bool {
         if not self.enabled { return false }
+        if e.kind == "mouse_down" and e.button == 3 {             // (for a context menu: no on_select)
+            row := (e.y - self.y - 2) / self._row_h()
+            if row >= 0 and self._top + row < self.items.length() { self.selected = self._top + row }
+            return true
+        }
         if e.kind == "mouse_down" and e.button == 1 {
             row := (e.y - self.y - 2) / self._row_h()
             if row >= 0 and self._top + row < self.items.length() {
@@ -3533,9 +3538,26 @@ struct TreeView : Widget {
         self.min_h = self.rows * self._row_h() + 2 * self._pad()
     }
 
+    --- The node on the row at (px, py) (null: none there). ---
+    define node_at(self, px: Int, py: Int) -> TreeNode {
+        if px < self.x or px >= self.x + self.width or py < self.y + self._pad() { return null }
+        vis := self.visible_nodes()
+        i := self._top + (py - self.y - self._pad()) / self._row_h()
+        if i < 0 or i >= vis.length() { return null }
+        n: TreeNode = vis[i]
+        return n
+    }
+
     define handle(self, e: window.Event) -> Bool {
         if not self.enabled { return false }
         vis := self.visible_nodes()
+        // A right-click selects its row for the context menu — quietly: no
+        // toggle, no on_select (it isn't a pick: a file isn't opened).
+        if e.kind == "mouse_down" and e.button == 3 {
+            n := self.node_at(e.x, e.y)
+            if n != null { self.selected = n }
+            return true
+        }
         if e.kind == "mouse_down" and e.button == 1 {
             row := (e.y - self.y - self._pad()) / self._row_h()
             i := self._top + row
@@ -7195,6 +7217,9 @@ struct App {
                 w: Widget = path[i]
                 if w.context_menu != null and w.enabled {
                     _close_popups()
+                    // The widget sees the click first: a list or a tree selects
+                    // the row it's on, so the menu is about that row.
+                    w.handle(e)
                     w.context_menu.open_at(e.x, e.y)
                     return
                 }

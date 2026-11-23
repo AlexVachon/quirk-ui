@@ -2164,3 +2164,39 @@ define test_menu_shortcut_shown_only() -> void {
     test.assert_eq(ran, ["save", "undo"])
     app.close()
 }
+
+// ───── v1.16.0: a right-click selects the row its menu is about ─────
+define test_right_click_selects_row() -> void {
+    if not window.available() { return }
+    app := new_app()
+    a := ui.TreeNode("a", [ui.TreeNode("a1")], expanded=true)
+    b := ui.TreeNode("b")
+    picked := []
+    tree := ui.TreeView([a, b], rows=6, on_select=fn(n) {
+        node: ui.TreeNode = n
+        picked.append(node.text)
+    })
+    hits := []
+    tree.context_menu = ui.Menu([ui.MenuItem("Which", on_click=fn() { hits.append(tree.selected.text) })])
+    app.root = ui.Column([tree], padding=0)
+    app.layout()
+    app.draw()
+    rh := tree._row_h()
+    y := tree.y + tree._pad() + 2 * rh + rh / 2                  // the third row: b
+    test.assert_eq(tree.node_at(tree.x + 10, y).text, "b")
+    test.assert_true(tree.node_at(tree.x + 10, tree.y + 50 * rh) == null)
+    e := window.Event("mouse_down")
+    e.x = tree.x + 10
+    e.y = y
+    e.button = 3
+    e.clicks = 1
+    app.dispatch(e)
+    test.assert_eq(tree.selected.text, "b")
+    test.assert_true(a.expanded)                                  // (no toggle)
+    test.assert_eq(picked.length(), 0)                            // (no on_select: not a pick)
+    test.assert_true(tree.context_menu.is_open)
+    keym(app, "down")
+    keym(app, "return")
+    test.assert_eq(hits, ["b"])
+    app.close()
+}
