@@ -1487,7 +1487,8 @@ struct TextInput : TextEdit {
         while end > self._scroll and self._span_w(self._scroll, end) > avail { end = end - 1 }
         ty := self.y + (self.height - t.line()) / 2
         if n == 0 {
-            if not self.focused and self.placeholder.length() > 0 {
+            // (Focused too, behind the cursor: a palette's field always is.)
+            if self.placeholder.length() > 0 {
                 win.text(t.fit(self.placeholder, avail), self.x + 8, ty, t.muted, scale=t.scale, font=t.font)
             }
         } else {
@@ -2713,15 +2714,21 @@ struct Toolbar : Row {
 A strip of text sections along the bottom of a window:
 `ui.StatusBar(["Ready", "Ln 1, Col 1"])`. The first section takes the
 free space; the others are right-aligned. `set(i, text)` changes one.
+`lead`: a coloured item at the left edge, a button (`on_lead()` on a
+click, `lead_tip` its tooltip) — VS Code's remote indicator.
 ---
 struct StatusBar : Widget {
     sections: List
+    lead: String
+    on_lead: Callable
+    lead_tip: String
+    _lead_w: Int
     define access_role(self) -> String {
         return "status"
     }
 
     define access_value(self) -> String {
-        out := ""
+        out := self.lead
         for sec in self.sections {
             if out != "" { out = out + " | " }
             out = out + String(sec)
@@ -2730,9 +2737,43 @@ struct StatusBar : Widget {
     }
 
 
-    define __init(self, sections: List) -> void {
+    define __init(self, sections: List, lead: String = "", on_lead: Callable = null, lead_tip: String = "") -> void {
         super().__init()
         self.sections = sections
+        self.lead = lead
+        self.on_lead = on_lead
+        self.lead_tip = lead_tip
+        self._lead_w = 0
+        self.takes_clicks = true
+    }
+
+    define access_action(self, action: String, value: String, node: AccessNode) -> Bool {
+        if action != "invoke" or self.lead == "" or self.on_lead == null { return false }
+        self.on_lead()
+        return true
+    }
+
+    // The lead item's width (0: none).
+    define _lead_width(self, t: Theme) -> Int {
+        if self.lead == "" { return 0 }
+        return t.text_w(self.lead) + 2 * t.char_w()
+    }
+
+    define _on_lead(self, px: Int, py: Int) -> Bool {
+        return self._lead_w > 0 and px >= self.x and px < self.x + self._lead_w and py >= self.y and py < self.y + self.height
+    }
+
+    define handle(self, e: window.Event) -> Bool {
+        if e.kind == "mouse_down" and e.button == 1 and self._on_lead(e.x, e.y) {
+            if self.on_lead != null { self.on_lead() }
+            return true
+        }
+        return e.kind == "mouse_up"
+    }
+
+    define tooltip_at(self, px: Int, py: Int) -> String {
+        if self._on_lead(px, py) and self.lead_tip != "" { return self.lead_tip }
+        return self.tooltip
     }
 
     --- Change section `i`'s text (adds sections as needed). ---
@@ -2750,7 +2791,7 @@ struct StatusBar : Widget {
     define measure(self, t: Theme) -> void {
         w := 0
         for sct in self.sections { w = w + t.text_w(sct.str()) + 3 * t.char_w() }
-        self.min_w = w
+        self.min_w = w + self._lead_width(t)
         self.min_h = t.line() + 8
     }
 
@@ -2758,8 +2799,20 @@ struct StatusBar : Widget {
         win.rect(self.x, self.y, self.width, self.height, t.surface)
         win.rect(self.x, self.y, self.width, 1, t.border)
         ty := self.y + (self.height - t.line()) / 2
+        self._lead_w = self._lead_width(t)
+        lx := self.x
+        if self._lead_w > 0 {
+            bg := t.accent
+            if self.hovered {
+                m := win.mouse()
+                if self._on_lead(m.0, m.1) { bg = mix(t.accent, t.accent_text, 15) }
+            }
+            win.rect(self.x, self.y, self._lead_w, self.height, bg)
+            win.text(self.lead, self.x + t.char_w(), ty, t.accent_text, scale=t.scale, font=t.font)
+            lx = self.x + self._lead_w
+        }
         if self.sections.length() == 0 { return }
-        win.text(self.get(0), self.x + t.char_w(), ty, t.muted, scale=t.scale, font=t.font)
+        win.text(self.get(0), lx + t.char_w(), ty, t.muted, scale=t.scale, font=t.font)
         rx := self.x + self.width - t.char_w()
         i := self.sections.length() - 1
         while i >= 1 {
@@ -5672,7 +5725,8 @@ struct FileDialog : Widget {
 A row of a `Palette`: its `label`, a muted `detail` after it (a file's
 folder), a `hint` on the right (a shortcut), any `data`. `marks` /
 `detail_marks` are character indices drawn in the accent colour — the
-letters a fuzzy match found.
+letters a fuzzy match found. `separator`: a line above the row (the start
+of a group, as VS Code's remote menu).
 ---
 struct PaletteItem {
     label: String
@@ -5681,9 +5735,11 @@ struct PaletteItem {
     data: Any
     marks: List
     detail_marks: List
+    separator: Bool
 
-    define __init(self, label: String, detail: String = "", hint: String = "", data: Any = null, marks: List = null, detail_marks: List = null) -> void {
+    define __init(self, label: String, detail: String = "", hint: String = "", data: Any = null, marks: List = null, detail_marks: List = null, separator: Bool = false) -> void {
         self.label = label
+        self.separator = separator
         self.detail = detail
         self.hint = hint
         self.data = data
@@ -5984,6 +6040,7 @@ struct Palette : Widget {
             right := x + w - 2 * cw
             if v != null and type(v) == "PaletteItem" {
                 it: PaletteItem = v
+                if it.separator and i > self._top { win.rect(x + 4, ry, w - 8, 1, t.border) }
                 if it.hint.length() > 0 {
                     hw := t.text_w(it.hint)
                     right = right - hw

@@ -2200,3 +2200,46 @@ define test_right_click_selects_row() -> void {
     test.assert_eq(hits, ["b"])
     app.close()
 }
+
+// ───── v1.17.0: a status bar's lead item (VS Code's remote indicator), palette separators ─────
+define test_status_bar_lead_is_a_button() -> void {
+    if not window.available() { return }
+    app := new_app()
+    hits := []
+    status := ui.StatusBar(["folder", "Ln 1"], lead="><  WSL: Ubuntu", on_lead=fn() { hits.append("lead") },
+                           lead_tip="Open a Remote Window")
+    app.root = ui.Column([ui.Spacer(), status], spacing=0)
+    app.layout()
+    app.draw()
+    test.assert_true(status._lead_w > 0)
+    click(app, status.x + 4, status.y + status.height / 2)
+    test.assert_eq(hits, ["lead"])
+    click(app, status.x + status._lead_w + 40, status.y + status.height / 2)      // the folder's name: no click
+    test.assert_eq(hits.length(), 1)
+    test.assert_eq(status.tooltip_at(status.x + 4, status.y + 4), "Open a Remote Window")
+    test.assert_eq(status.tooltip_at(status.x + status._lead_w + 40, status.y + 4), "")
+    // Its colour: the accent, under the lead's text.
+    test.assert_eq(app.win.pixel(status.x + 1, status.y + status.height / 2), app.theme.accent % 16777216)
+    status.lead = ""
+    app.draw()
+    test.assert_eq(status._lead_w, 0)
+    test.assert_true(status.access_value().startswith("folder"))
+    app.close()
+}
+
+define test_palette_item_separator() -> void {
+    if not window.available() { return }
+    app := new_app()
+    rows := [ui.PaletteItem("Connect", hint="WSL"), ui.PaletteItem("Reopen"), ui.PaletteItem("Close", separator=true)]
+    pal := ui.Palette(on_query=fn(q) { return rows })
+    test.assert_true(not ui.PaletteItem("x").separator)
+    app.root = ui.Column([ui.Label("x")])
+    app.layout()
+    pal.show("")
+    app.draw()
+    // A line above "Close" (the third row), none above "Reopen".
+    x := pal._px + pal._pw / 2
+    test.assert_eq(app.win.pixel(x, pal._ly + 2 * pal._rh), app.theme.border % 16777216)
+    test.assert_true(app.win.pixel(x, pal._ly + pal._rh) != app.theme.border % 16777216)
+    app.close()
+}
