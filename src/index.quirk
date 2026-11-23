@@ -6142,7 +6142,7 @@ define preview_event(line: String) -> window.Event {
             nums.append(Int(String(p[i])))
             i = i + 1
         }
-    } catch (x: Exception) {
+    } catch (Exception) {
         nums = nums
     }
     if kind == "mouse_move" or kind == "mouse_down" or kind == "mouse_up" {
@@ -6894,7 +6894,7 @@ struct App {
                 try {
                     w = _max(100, Int(String(size[0])))
                     h = _max(100, Int(String(size[1])))
-                } catch (e: Exception) {
+                } catch (Exception) {
                     w = width
                     h = height
                 }
@@ -7675,7 +7675,7 @@ struct App {
             if fs.is_file(ev) { self._pv_off = fs.read_text(ev).length() }      // (a restart: not the old ones)
             n := fs.join(d, "frame.n")
             if fs.is_file(n) { self._pv_n = Int(fs.read_text(n).trim()) }
-        } catch (e: Exception) {
+        } catch (Exception) {
             self._pv_off = 0
         }
     }
@@ -7688,7 +7688,7 @@ struct App {
             fs.rename(tmp, fs.join(d, "frame.bmp"))
             self._pv_n = self._pv_n + 1
             fs.write_text(fs.join(d, "frame.n"), String(self._pv_n))
-        } catch (e: Exception) {
+        } catch (Exception) {
             self._pv_n = self._pv_n          // (the view may be reading it: the next frame)
         }
     }
