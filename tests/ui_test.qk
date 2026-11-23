@@ -2243,3 +2243,76 @@ define test_palette_item_separator() -> void {
     test.assert_true(app.win.pixel(x, pal._ly + pal._rh) != app.theme.border % 16777216)
     app.close()
 }
+
+// ───── v1.18.0: font weights, button colours, previewed apps (an IDE's live view) ─────
+define test_weights_and_button_colors() -> void {
+    if not window.available() { return }
+    app := new_app()
+    t := app.theme
+    plain := ui.Label("Weight")
+    bold := ui.Label("Weight", weight="bold")
+    semi := ui.Label("Weight", weight="600")
+    red := ui.Button("Go", color=window.hex("#d03030"), text_color=window.hex("#ffffff"), weight="semibold")
+    app.root = ui.Column([plain, bold, semi, red], padding=0)
+    app.layout()
+    app.draw()
+    // No font for bold: drawn twice, a pixel wider.
+    test.assert_eq(bold.min_w, plain.min_w + 1)
+    test.assert_eq(semi.min_w, plain.min_w + 1)
+    test.assert_true(t.font_for("bold") == t.font)
+    test.assert_eq(ui.Label("x", weight="medium").weight, "medium")
+    test.assert_eq(app.win.pixel(red.x + 2, red.y + 2), window.hex("#d03030") % 16777216)
+    plain_btn := ui.Button("Go")
+    test.assert_eq(plain_btn.color, -1)                          // (the theme's accent)
+    app.close()
+}
+
+define test_preview_event_lines() -> void {
+    e := ui.preview_event("mouse_down 10 20 1 2")
+    test.assert_eq(e.kind, "mouse_down")
+    test.assert_eq(e.x, 10)
+    test.assert_eq(e.y, 20)
+    test.assert_eq(e.clicks, 2)
+    test.assert_true(e.left)
+    k := ui.preview_event("key_down s 1 0 0 0")
+    test.assert_eq(k.key, "s")
+    test.assert_true(k.ctrl)
+    test.assert_true(not k.shift)
+    test.assert_eq(ui.preview_event("text héllo world").text, "héllo world")
+    test.assert_true(ui.preview_event("nonsense") == null)
+    test.assert_true(ui.preview_event("mouse_move 1") == null)
+    // And back: what a view writes for an event.
+    for line in ["mouse_move 3 4", "mouse_down 3 4 1 1", "mouse_up 3 4 1", "wheel 0 -2", "key_down a 0 1 0 0", "key_up a", "text ab"] {
+        l := String(line)
+        test.assert_eq(ui.preview_line(ui.preview_event(l)), l)
+    }
+}
+
+define test_previewed_app_writes_frames_and_reads_events() -> void {
+    if not window.available() { return }
+    dir := fs.temp_dir(prefix="ui-preview-")
+    fs.write_text(fs.join(dir, "events"), "mouse_move 1 1\n")      // (from before this run: skipped)
+    app := new_app()
+    app._pv_dir = dir
+    app._preview_start()
+    clicks := []
+    b := ui.Button("Press", on_click=fn() { clicks.append(1) })
+    app.root = ui.Column([b], padding=0)
+    app.step()
+    test.assert_true(fs.is_file(fs.join(dir, "frame.bmp")))
+    test.assert_eq(fs.read_text(fs.join(dir, "frame.n")).trim(), "1")
+    x := String(b.x + 5)
+    y := String(b.y + 5)
+    fs.write_text(fs.join(dir, "events"), "mouse_move 1 1\nmouse_down " + x + " " + y + " 1 1\nmouse_up " + x + " " + y + " 1\n")
+    app.step()
+    test.assert_eq(clicks.length(), 1)
+    test.assert_eq(fs.read_text(fs.join(dir, "frame.n")).trim(), "2")
+    // A half-written line waits for its end.
+    fs.write_text(fs.join(dir, "events"), fs.read_text(fs.join(dir, "events")) + "mouse_down " + x)
+    app.step()
+    test.assert_eq(clicks.length(), 1)
+    // The view removed the folder (it stopped): the app closes.
+    fs.remove_tree(dir)
+    app.step()
+    test.assert_true(not app.is_open())
+}

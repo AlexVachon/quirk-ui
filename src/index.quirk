@@ -76,6 +76,7 @@ from typing.primitives.string use { String }
 from typing.collections.list use { List }
 use window
 use fs
+use sys
 
 // Ids for the accessibility tree (Widget.access_id, App item ids).
 _a11y_counter := [0]
@@ -135,6 +136,7 @@ struct Theme {
     focus: Int
     scale: Int
     font: window.Font
+    weights: Map             // weight ("medium", "semibold", "bold") → its Font (see set_weight)
 
     define __init(self, background: Int, surface: Int, text: Int, muted: Int, accent: Int, accent_text: Int, input: Int, border: Int, focus: Int, scale: Int = 1) -> void {
         self.background = background
@@ -148,6 +150,29 @@ struct Theme {
         self.focus = focus
         self.scale = scale
         self.font = null
+        self.weights = {}
+    }
+
+    ---
+    The font for text of `weight` ("medium", "semibold", "bold", or 500 /
+    600 / 700): `theme.set_weight("bold", window.load_font("Inter-Bold.ttf", 13))`.
+    Without one, "semibold" and "bold" are drawn twice, a pixel apart.
+    ---
+    define set_weight(self, weight: String, font: window.Font) -> void {
+        self.weights[_weight_name(weight)] = font
+    }
+
+    --- The font for `weight` ("" or "regular": `font`). ---
+    define font_for(self, weight: String = "") -> window.Font {
+        w := _weight_name(weight)
+        if w != "regular" and self.weights.has(w) { return self.weights[w] }
+        return self.font
+    }
+
+    // A weight drawn twice (no font of its own).
+    define _doubled(self, weight: String) -> Bool {
+        w := _weight_name(weight)
+        return (w == "semibold" or w == "bold") and not self.weights.has(w)
     }
 
     --- Height of one line of text. ---
@@ -162,15 +187,19 @@ struct Theme {
         return 8 * self.scale
     }
 
-    --- Width in pixels of `s` (its longest line) in the theme's font. ---
-    define text_w(self, s: String) -> Int {
-        if self.font != null { return self.font.width(s) }
-        return window.text_width(s, self.scale)
+    --- Width in pixels of `s` (its longest line) in the theme's font (of `weight`). ---
+    define text_w(self, s: String, weight: String = "") -> Int {
+        extra := self._doubled(weight) ? 1 : 0
+        f := self.font_for(weight)
+        if f != null { return f.width(s) + extra }
+        return window.text_width(s, self.scale) + extra
     }
 
-    --- Draw `s` at (x, y) in the theme's font. ---
-    define draw_text(self, win: window.Window, s: String, x: Int, y: Int, color: Int) -> void {
-        win.text(s, x, y, color, scale=self.scale, font=self.font)
+    --- Draw `s` at (x, y) in the theme's font (of `weight`). ---
+    define draw_text(self, win: window.Window, s: String, x: Int, y: Int, color: Int, weight: String = "") -> void {
+        f := self.font_for(weight)
+        win.text(s, x, y, color, scale=self.scale, font=f)
+        if self._doubled(weight) { win.text(s, x + 1, y, color, scale=self.scale, font=f) }
     }
 
     --- `s` cut to fit `px` pixels. ---
@@ -181,6 +210,15 @@ struct Theme {
         while n > 0 and self.text_w(s.substring(0, n)) > px { n = n - 1 }
         return s.substring(0, n)
     }
+}
+
+// "bold", "700", "Bold" → "bold"; unknown → "regular".
+define _weight_name(weight: String) -> String {
+    w := weight.trim().lower()
+    if w == "500" or w == "medium" { return "medium" }
+    if w == "600" or w == "semibold" or w == "semi-bold" { return "semibold" }
+    if w == "700" or w == "800" or w == "900" or w == "bold" { return "bold" }
+    return "regular"
 }
 
 --- Light text on dark grey, blue accent. ---
@@ -734,6 +772,7 @@ struct Label : Widget {
     text: String
     color: Int
     align: String
+    weight: String           // "regular", "medium", "semibold", "bold" (see Theme.set_weight)
     define access_role(self) -> String {
         return "text"
     }
@@ -743,15 +782,16 @@ struct Label : Widget {
     }
 
 
-    define __init(self, text: String, color: Int = -1, align: String = "left") -> void {
+    define __init(self, text: String, color: Int = -1, align: String = "left", weight: String = "") -> void {
         super().__init()
         self.text = text
         self.color = color
         self.align = align
+        self.weight = weight
     }
 
     define measure(self, t: Theme) -> void {
-        self.min_w = t.text_w(self.text)
+        self.min_w = t.text_w(self.text, self.weight)
         lines := self.text.split("\n").length()
         self.min_h = _max(1, lines) * t.line()
     }
@@ -759,12 +799,12 @@ struct Label : Widget {
     define draw(self, win: window.Window, t: Theme) -> void {
         c := self.color
         if c == -1 { c = t.text }
-        tw := t.text_w(self.text)
+        tw := t.text_w(self.text, self.weight)
         tx := self.x
         if self.align == "center" { tx = self.x + (self.width - tw) / 2 }
         if self.align == "right" { tx = self.x + self.width - tw }
         ty := self.y + (self.height - self.min_h) / 2
-        win.text(self.text, tx, ty, _ink(self, c, t), scale=t.scale, font=t.font)
+        t.draw_text(win, self.text, tx, ty, _ink(self, c, t), weight=self.weight)
     }
 }
 
@@ -772,11 +812,16 @@ struct Label : Widget {
 
 ---
 A push button. `on_click` (no arguments) runs when it's clicked, or
-when it has the focus and Enter / Space is pressed.
+when it has the focus and Enter / Space is pressed. `color`: its
+background (-1: the theme's accent); `text_color` (-1: accent_text);
+`weight` of its text ("medium", "semibold", "bold").
 ---
 struct Button : Widget {
     text: String
     on_click: Callable
+    color: Int
+    text_color: Int
+    weight: String
     define access_action(self, action: String, value: String, node: AccessNode) -> Bool {
         if action != "invoke" or not self.enabled { return false }
         self.click()
@@ -792,12 +837,15 @@ struct Button : Widget {
     }
 
 
-    define __init(self, text: String, on_click: Callable = null, expand: Bool = false) -> void {
+    define __init(self, text: String, on_click: Callable = null, expand: Bool = false, color: Int = -1, text_color: Int = -1, weight: String = "") -> void {
         super().__init()
         self.text = text
         self.on_click = on_click
         self.focusable = true
         self.expand = expand
+        self.color = color
+        self.text_color = text_color
+        self.weight = weight
     }
 
     --- Press the button from code. ---
@@ -806,23 +854,25 @@ struct Button : Widget {
     }
 
     define measure(self, t: Theme) -> void {
-        self.min_w = t.text_w(self.text) + 4 * t.char_w()
+        self.min_w = t.text_w(self.text, self.weight) + 4 * t.char_w()
         self.min_h = t.line() + 12
     }
 
     define draw(self, win: window.Window, t: Theme) -> void {
-        bg := t.accent
+        base := self.color != -1 ? self.color : t.accent
+        bg := base
         if not self.enabled {
-            bg = mix(t.accent, t.background, 60)
+            bg = mix(base, t.background, 60)
         } elif self.pressed {
-            bg = mix(t.accent, window.black(), 25)
+            bg = mix(base, window.black(), 25)
         } elif self.hovered {
-            bg = mix(t.accent, window.white(), 15)
+            bg = mix(base, window.white(), 15)
         }
         win.rect(self.x, self.y, self.width, self.height, bg)
-        tw := t.text_w(self.text)
-        win.text(self.text, self.x + (self.width - tw) / 2, self.y + (self.height - t.line()) / 2,
-                 _ink(self, t.accent_text, t), scale=t.scale, font=t.font)
+        tw := t.text_w(self.text, self.weight)
+        ink := self.text_color != -1 ? self.text_color : t.accent_text
+        t.draw_text(win, self.text, self.x + (self.width - tw) / 2, self.y + (self.height - t.line()) / 2,
+                    _ink(self, ink, t), weight=self.weight)
         if self.focused { _focus_ring(win, self, t) }
     }
 
@@ -6071,6 +6121,80 @@ struct Palette : Widget {
     }
 }
 
+---
+A line of a previewed app's events file as a `window.Event` (null if it
+isn't one) — see `App` (QUIRK_UI_PREVIEW). `preview_line(e)` writes one.
+---
+define preview_event(line: String) -> window.Event {
+    l := line.replace("\r", "")
+    if l.startswith("text ") {
+        e := window.Event("text")
+        e.text = l.substring(5, l.length())
+        return e
+    }
+    p := l.split(" ")
+    if p.length() == 0 { return null }
+    kind := String(p[0])
+    nums := []
+    try {
+        i := 1
+        while i < p.length() {
+            nums.append(Int(String(p[i])))
+            i = i + 1
+        }
+    } catch (x: Exception) {
+        nums = nums
+    }
+    if kind == "mouse_move" or kind == "mouse_down" or kind == "mouse_up" {
+        if p.length() < 3 { return null }
+        e := window.Event(kind)
+        e.x = _nth(nums, 0)
+        e.y = _nth(nums, 1)
+        e.button = kind == "mouse_move" ? 0 : _max(1, _nth(nums, 2))
+        e.clicks = kind == "mouse_down" ? _max(1, _nth(nums, 3)) : 0
+        e.left = kind == "mouse_down" and e.button == 1
+        return e
+    }
+    if kind == "wheel" {
+        e := window.Event("wheel")
+        e.dx = _nth(nums, 0)
+        e.dy = _nth(nums, 1)
+        return e
+    }
+    if (kind == "key_down" or kind == "key_up") and p.length() >= 2 {
+        e := window.Event(kind)
+        e.key = String(p[1])
+        e.ctrl = p.length() > 2 and String(p[2]) == "1"
+        e.shift = p.length() > 3 and String(p[3]) == "1"
+        e.alt = p.length() > 4 and String(p[4]) == "1"
+        e.meta = p.length() > 5 and String(p[5]) == "1"
+        return e
+    }
+    return null
+}
+
+define _bit(v: Bool) -> String {
+    return v ? "1" : "0"
+}
+
+define _nth(nums: List, i: Int) -> Int {
+    if i < nums.length() { return Int(nums[i]) }
+    return 0
+}
+
+--- The events-file line for `e` ("" for an event a preview doesn't pass on). ---
+define preview_line(e: window.Event) -> String {
+    k := e.kind
+    if k == "mouse_move" { return "mouse_move " + String(e.x) + " " + String(e.y) }
+    if k == "mouse_down" { return "mouse_down " + String(e.x) + " " + String(e.y) + " " + String(e.button) + " " + String(_max(1, e.clicks)) }
+    if k == "mouse_up" { return "mouse_up " + String(e.x) + " " + String(e.y) + " " + String(e.button) }
+    if k == "wheel" { return "wheel " + String(e.dx) + " " + String(e.dy) }
+    if k == "key_down" { return "key_down " + e.key + " " + _bit(e.ctrl) + " " + _bit(e.shift) + " " + _bit(e.alt) + " " + _bit(e.meta) }
+    if k == "key_up" { return "key_up " + e.key }
+    if k == "text" and not e.text.contains("\n") { return "text " + e.text }
+    return ""
+}
+
 // Every visible MenuBar in the tree.
 define _all_menu_bars(w: Widget) -> List {
     out := []
@@ -6749,9 +6873,35 @@ struct App {
     _hit_key: String         // the title bar's areas last told the window
     _timers: List
     _wake_draws: Bool        // the wake _next_wake gave is for a frame (not just a timer)
+    _pv_dir: String          // QUIRK_UI_PREVIEW: a folder an IDE shows this app through ("": not previewed)
+    _pv_off: Int             // how much of <folder>/events was read
+    _pv_n: Int               // frames written
 
     define __init(self, title: String, width: Int, height: Int, theme: Theme = null, resizable: Bool = true, headless: Bool = false, title_bar: Bool = false) -> void {
-        self.win = window.open(title, width, height, resizable=resizable, headless=headless, borderless=title_bar)
+        // Previewed (an IDE's live view): no window of its own, at the
+        // view's size; each frame drawn goes to <folder>/frame.bmp, the
+        // view's mouse and keys come from <folder>/events.
+        self._pv_dir = sys.env("QUIRK_UI_PREVIEW")
+        self._pv_off = 0
+        self._pv_n = 0
+        w := width
+        h := height
+        hl := headless
+        if self._pv_dir != "" {
+            hl = true
+            size := sys.env("QUIRK_UI_PREVIEW_SIZE").split("x")
+            if size.length() == 2 {
+                try {
+                    w = _max(100, Int(String(size[0])))
+                    h = _max(100, Int(String(size[1])))
+                } catch (e: Exception) {
+                    w = width
+                    h = height
+                }
+            }
+            self._preview_start()
+        }
+        self.win = window.open(title, w, h, resizable=resizable, headless=hl, borderless=title_bar)
         self.root = Column([])
         self.title_bar = null
         self._frame = null
@@ -7430,6 +7580,13 @@ struct App {
         events := self._pending
         self._pending = []
         for e in self.win.events() { events.append(e) }
+        if self._pv_dir != "" {
+            for pe in self._preview_events() {
+                ev: window.Event = pe
+                self.win._track(ev)
+                events.append(ev)
+            }
+        }
         for ev in events {
             e: window.Event = ev
             if not self.win.is_open() { return false }
@@ -7451,6 +7608,7 @@ struct App {
         self.layout()
         self.draw()
         self.win.present()
+        if self._pv_dir != "" { self._preview_frame() }
         self._a11y_sync()
         self._a11y_check()
         self._dirty = false
@@ -7500,6 +7658,68 @@ struct App {
             }
         }
         return wake
+    }
+
+    // ----- previewed (QUIRK_UI_PREVIEW=<folder>) -----
+    //   <folder>/frame.bmp  the last frame (written to frame.tmp.bmp, then renamed)
+    //   <folder>/frame.n    a number, one more for each frame (across restarts)
+    //   <folder>/events     lines the view appends: "mouse_move x y",
+    //                       "mouse_down x y button clicks", "mouse_up x y button",
+    //                       "wheel dx dy", "key_down key ctrl shift alt meta",
+    //                       "key_up key", "text <the rest of the line>"
+
+    define _preview_start(self) -> void {
+        d := self._pv_dir
+        try {
+            ev := fs.join(d, "events")
+            if fs.is_file(ev) { self._pv_off = fs.read_text(ev).length() }      // (a restart: not the old ones)
+            n := fs.join(d, "frame.n")
+            if fs.is_file(n) { self._pv_n = Int(fs.read_text(n).trim()) }
+        } catch (e: Exception) {
+            self._pv_off = 0
+        }
+    }
+
+    define _preview_frame(self) -> void {
+        d := self._pv_dir
+        try {
+            tmp := fs.join(d, "frame.tmp.bmp")
+            self.win.screenshot(tmp)
+            fs.rename(tmp, fs.join(d, "frame.bmp"))
+            self._pv_n = self._pv_n + 1
+            fs.write_text(fs.join(d, "frame.n"), String(self._pv_n))
+        } catch (e: Exception) {
+            self._pv_n = self._pv_n          // (the view may be reading it: the next frame)
+        }
+    }
+
+    define _preview_events(self) -> List {
+        out := []
+        // The view made the folder and removes it when it stops: then this
+        // app goes too (it may outlive a watcher that was killed).
+        if not fs.is_dir(self._pv_dir) {
+            self.close()
+            return out
+        }
+        p := fs.join(self._pv_dir, "events")
+        if not fs.is_file(p) { return out }
+        text := ""
+        try { text = fs.read_text(p) } catch (e: Exception) { return out }
+        if text.length() <= self._pv_off { return out }
+        chunk := text.substring(self._pv_off, text.length())
+        end := -1
+        at := chunk.find("\n")
+        while at >= 0 {
+            end = at
+            at = chunk.find("\n", at + 1)
+        }
+        if end < 0 { return out }                       // (a line still being written)
+        self._pv_off = self._pv_off + end + 1
+        for l in chunk.substring(0, end).split("\n") {
+            e := preview_event(String(l))
+            if e != null { out.append(e) }
+        }
+        return out
     }
 
     --- Draw the tree, open popups and the tooltip (what `step` shows). ---
@@ -7568,10 +7788,13 @@ struct App {
                 if self._wake_draws { self._dirty = true }
                 continue
             }
+            // (Previewed: the view's events come from a file — look every 30 ms.)
+            looked := self._pv_dir != "" and (wake < 0 or wake > 30)
+            if looked { wake = 30 }
             e := self.win.wait_event(wake < 0 ? 250 : wake)
             if e != null {
                 self._pending.append(e)
-            } elif wake > 0 and self._wake_draws {
+            } elif wake > 0 and self._wake_draws and not looked {
                 self._dirty = true                       // a frame that's due (blink, tooltip)
             }
         }
