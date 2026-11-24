@@ -1,0 +1,49 @@
+// ui: small helpers and the shared state (open popups, clips) every file uses
+
+from typing.primitives.string use { String }
+from typing.collections.list use { List }
+use window
+
+// Ids for the accessibility tree (Widget.access_id, App item ids).
+_a11y_counter := [0]
+
+define _max(a: Int, b: Int) -> Int {
+    if a > b { return a }
+    return b
+}
+
+define _min(a: Int, b: Int) -> Int {
+    if a < b { return a }
+    return b
+}
+
+define _clamp(v: Int, lo: Int, hi: Int) -> Int {
+    if v < lo { return lo }
+    if v > hi { return hi }
+    return v
+}
+
+---
+Blend colour `a` toward `b` by `percent` (0 = a, 100 = b). For hover and
+pressed shades.
+---
+define mix(a: Int, b: Int, percent: Int) -> Int {
+    ca := window.channels(a)
+    cb := window.channels(b)
+    p := _clamp(percent, 0, 100)
+    r := (ca[0] * (100 - p) + cb[0] * p) / 100
+    g := (ca[1] * (100 - p) + cb[1] * p) / 100
+    bl := (ca[2] * (100 - p) + cb[2] * p) / 100
+    al := (ca[3] * (100 - p) + cb[3] * p) / 100
+    return window.rgba(r, g, bl, al)
+}
+
+// Clip rectangles in force while drawing ([x, y, w, h], innermost last):
+// scroll views nest, so each one draws inside the intersection.
+_clips := []
+
+// Open popups (Dropdown lists), topmost last.
+_popups := []
+
+// Where the title bar ends (y), for popups placed under it (Palette); 0 without one.
+_bar_bottom := [0]

@@ -1,0 +1,354 @@
+// ui: the Widget base, clipping, popups, tooltips
+
+from typing.primitives.string use { String }
+from typing.collections.list use { List }
+use window
+from .util use { mix, _a11y_counter, _clips, _max, _min }
+from .theme use { Theme }
+from .menus use { Menu }
+from .access use { AccessNode }
+
+---
+What every widget has. Layout fills in `x`, `y`, `width`, `height` each
+frame; `min_w` / `min_h` are the size the widget asks for.
+  `expand`   — take a share of the container's free space
+  `visible`  — false: not drawn and takes no space
+  `enabled`  — false: drawn dimmed, ignores input
+  `hovered`, `focused`, `pressed` — set by the App
+  `tooltip`  — text shown when the mouse rests on it ("" = none)
+  `context_menu` — a `ui.Menu` opened by a right-click on it (or null)
+  `on_drag`  — `fn() => data`: the widget can be dragged, carrying `data`
+  `on_drop`  — `fn(data)`: something dragged can be dropped on it
+To make your own widget, subclass it and override `measure`, `draw` and
+`handle` (and `children` for containers).
+---
+struct Widget {
+    x: Int
+    y: Int
+    width: Int
+    height: Int
+    min_w: Int
+    min_h: Int
+    expand: Bool
+    visible: Bool
+    enabled: Bool
+    focusable: Bool
+    hovered: Bool
+    focused: Bool
+    pressed: Bool
+    tooltip: String
+    takes_clicks: Bool
+    takes_tab: Bool          // Tab / Shift+Tab are its own keys (a code editor), not "next widget"
+    context_menu: Menu
+    on_drag: Callable
+    on_drop: Callable
+    accessible_name: String
+    accessible_description: String
+    _a11y_label: String
+    _a11y_id: Int
+
+    define __init(self) -> void {
+        self.x = 0
+        self.y = 0
+        self.width = 0
+        self.height = 0
+        self.min_w = 0
+        self.min_h = 0
+        self.expand = false
+        self.visible = true
+        self.enabled = true
+        self.focusable = false
+        self.hovered = false
+        self.focused = false
+        self.pressed = false
+        self.tooltip = ""
+        self.takes_clicks = false
+        self.takes_tab = false
+        self.context_menu = null
+        self.on_drag = null
+        self.on_drop = null
+        self.accessible_name = ""
+        self.accessible_description = ""
+        self._a11y_label = ""
+        self._a11y_id = 0
+    }
+
+    --- Work out `min_w` / `min_h` (containers measure their children first). ---
+    define measure(self, t: Theme) -> void {
+    }
+
+    --- Take the box (x, y, width, height); containers place their children inside. ---
+    define place(self, x: Int, y: Int, width: Int, height: Int) -> void {
+        self.x = x
+        self.y = y
+        self.width = width
+        self.height = height
+    }
+
+    --- Draw into `win` inside the widget's box. ---
+    define draw(self, win: window.Window, t: Theme) -> void {
+    }
+
+    --- React to an event; true if the widget used it. ---
+    define handle(self, e: window.Event) -> Bool {
+        return false
+    }
+
+    --- True while an input method is composing text in this widget (it gets every key). ---
+    ---
+    In how many ms it must be drawn again though nothing happened (a
+    blinking caret), -1 for never. The App redraws only when something
+    happened — an event, an animation — or when this says so.
+    ---
+    define next_redraw(self) -> Int {
+        return -1
+    }
+
+    define composing(self) -> Bool {
+        return false
+    }
+
+    --- Child widgets (containers). ---
+    define children(self) -> List {
+        return []
+    }
+
+    // ----- accessibility (screen readers): see App.accessibility() -----
+
+    ---
+    What the widget is to assistive technology: "button", "checkbox",
+    "textbox", "slider", "list", "tab", "menu"... — "group" for a
+    container, "none" for something purely visual (a Spacer).
+    ---
+    define access_role(self) -> String {
+        return "group"
+    }
+
+    ---
+    Its accessible name — what a screen reader says: `accessible_name` if
+    set, else what the widget shows (a button's text), else the text of a
+    Label just before it, else its tooltip.
+    ---
+    define access_name(self) -> String {
+        if self.accessible_name != "" { return self.accessible_name }
+        n := self._a11y_name()
+        if n != "" { return n }
+        if self._a11y_label != "" { return self._a11y_label }
+        return self._a11y_fallback()
+    }
+
+    define _a11y_name(self) -> String {
+        return ""
+    }
+
+    define _a11y_fallback(self) -> String {
+        return self.tooltip
+    }
+
+    --- Its value as text — a field's text, a slider's number — or "". ---
+    define access_value(self) -> String {
+        return ""
+    }
+
+    --- States: "focusable", "focused", "disabled", "checked", "selected", "expanded"... ---
+    define access_states(self) -> List {
+        out := []
+        if self.focusable { out.append("focusable") }
+        if self.focused { out.append("focused") }
+        if not self.enabled { out.append("disabled") }
+        self._a11y_states(out)
+        return out
+    }
+
+    define _a11y_states(self, out: List) -> void {
+    }
+
+    // The nodes inside: one per visible child widget. A Label followed by
+    // a focusable widget names it (when it has no name of its own).
+    // Lists, tables, tabs and menus give nodes for their items instead.
+    define _a11y_children(self) -> List {
+        out := []
+        label := ""
+        for c in self.children() {
+            cw: Widget = c
+            if not cw.visible { continue }
+            role := cw.access_role()
+            if role == "text" {
+                label = cw.access_name()
+            } elif cw.focusable and label != "" {
+                cw._a11y_label = label
+                label = ""
+            } else {
+                label = ""
+            }
+            node := cw.access_node()
+            if node != null { out.append(node) }
+        }
+        return out
+    }
+
+    --- This widget as an `AccessNode` (children included); null when hidden or purely visual. ---
+    define access_node(self) -> AccessNode {
+        if not self.visible { return null }
+        role := self.access_role()
+        if role == "none" { return null }
+        kids := self._a11y_children()      // first: may name children from Labels
+        n := AccessNode(role, self.access_name(), self.access_value(), self.x, self.y, self.width, self.height)
+        n.description = self.accessible_description
+        if n.description == "" { n.description = self._a11y_description() }
+        n.states = self.access_states()
+        n.widget = self
+        n.id = self.access_id()
+        n.children = kids
+        return n
+    }
+
+    define _a11y_description(self) -> String {
+        return ""
+    }
+
+    --- A number identifying the widget to assistive technology, the same for its whole life. ---
+    define access_id(self) -> Int {
+        if self._a11y_id == 0 {
+            _a11y_counter[0] = _a11y_counter[0] + 1
+            self._a11y_id = _a11y_counter[0]
+        }
+        return self._a11y_id
+    }
+
+    ---
+    Do what a screen reader asks: `action` is "invoke", "toggle",
+    "set_value" / "set_range" (`value`), "select", "expand" or "collapse",
+    on this widget or one of its items (`node.index`, `node.data`). True if
+    it did something.
+    ---
+    define access_action(self, action: String, value: String, node: AccessNode) -> Bool {
+        return false
+    }
+
+    // [min, max, value] for sliders and progress bars; [] otherwise.
+    define _a11y_range(self) -> List {
+        return []
+    }
+
+    ---
+    The tooltip for the point (px, py) — `tooltip` by default. A widget
+    whose parts say different things (a code editor's error marks, a
+    table's cells) overrides it; "" for none there.
+    ---
+    define tooltip_at(self, px: Int, py: Int) -> String {
+        return self.tooltip
+    }
+
+    --- True if (px, py) is inside the widget's box. ---
+    define contains(self, px: Int, py: Int) -> Bool {
+        return px >= self.x and py >= self.y and px < self.x + self.width and py < self.y + self.height
+    }
+
+    // Popups (Dropdown): drawn above everything, offered mouse events first.
+    define draw_popup(self, win: window.Window, t: Theme) -> void {
+    }
+
+    define popup_contains(self, px: Int, py: Int) -> Bool {
+        return false
+    }
+
+    define popup_handle(self, e: window.Event) -> Bool {
+        return false
+    }
+
+    // Keys for an open popup that takes them itself (Menu); true if used.
+    define popup_key(self, e: window.Event) -> Bool {
+        return false
+    }
+
+    define close_popup(self) -> void {
+    }
+
+    // Open this popup at (px, py) (Menu).
+    define open_at(self, px: Int, py: Int) -> void {
+    }
+
+    // True for a MenuBar (its menus' shortcuts work window-wide).
+    define is_menu_bar(self) -> Bool {
+        return false
+    }
+}
+
+---
+Give `w` a tooltip and return it — for building trees inline:
+`ui.tooltip(ui.Button("Save", on_click=save), "Write the file (Ctrl+S)")`.
+---
+define tooltip(w: Widget, text: String) -> Widget {
+    w.tooltip = text
+    return w
+}
+
+// Draw the focus ring around a widget.
+define _focus_ring(win: window.Window, w: Widget, t: Theme) -> void {
+    win.rect(w.x - 2, w.y - 2, w.width + 4, w.height + 4, t.focus, fill=false)
+}
+
+// Text colour for a widget that may be disabled.
+define _ink(w: Widget, color: Int, t: Theme) -> Int {
+    if not w.enabled { return mix(color, t.background, 55) }
+    return color
+}
+
+define _clip_push(win: window.Window, x: Int, y: Int, w: Int, h: Int) -> void {
+    nx := x
+    ny := y
+    nr := x + w
+    nb := y + h
+    if _clips.length() > 0 {
+        top: List = _clips[_clips.length() - 1]
+        tx: Int = top[0]
+        ty: Int = top[1]
+        tw: Int = top[2]
+        th: Int = top[3]
+        nx = _max(nx, tx)
+        ny = _max(ny, ty)
+        nr = _min(nr, tx + tw)
+        nb = _min(nb, ty + th)
+    }
+    cw := _max(0, nr - nx)
+    ch := _max(0, nb - ny)
+    _clips.append([nx, ny, cw, ch])
+    win.clip(nx, ny, cw, ch)
+}
+
+define _clip_pop(win: window.Window) -> void {
+    if _clips.length() > 0 { _clips.pop() }
+    if _clips.length() == 0 {
+        win.unclip()
+    } else {
+        top: List = _clips[_clips.length() - 1]
+        tx: Int = top[0]
+        ty: Int = top[1]
+        tw: Int = top[2]
+        th: Int = top[3]
+        win.clip(tx, ty, tw, th)
+    }
+}
+
+// Selection highlight colour.
+define _sel_color(w: Widget, t: Theme) -> Int {
+    if w.focused { return mix(t.accent, t.input, 55) }
+    return mix(t.border, t.input, 30)
+}
+
+// Letters, digits and _ make up words (double-click, Ctrl+arrows).
+define _wordy(c: String) -> Bool {
+    return c.is_alpha() or c.is_digit() or c == "_"
+}
+
+// The focused widget inside w (w included), or null.
+define _focused_in(w: Widget) -> Widget {
+    if not w.visible { return null }
+    if w.focused { return w }
+    for c in w.children() {
+        f := _focused_in(c)
+        if f != null { return f }
+    }
+    return null
+}

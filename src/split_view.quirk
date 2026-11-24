@@ -1,0 +1,132 @@
+// ui: SplitView
+
+from typing.primitives.string use { String }
+from typing.collections.list use { List }
+use window
+from .util use { _clamp, _max, _min }
+from .theme use { Theme }
+from .widget use { Widget, _clip_pop, _clip_push }
+
+---
+Two widgets side by side (or stacked: `vertical=true`) with a divider
+you drag to share the space. `ratio` is the first pane's share in
+percent; `min_size` the smallest a pane gets (pixels). It takes its
+container's free space (`expand`) unless told otherwise.
+---
+struct SplitView : Widget {
+    first: Widget
+    second: Widget
+    vertical: Bool
+    ratio: Int
+    min_size: Int
+    on_change: Callable
+    _drag: Bool
+
+    define __init(self, first: Widget, second: Widget, vertical: Bool = false, ratio: Int = 50, min_size: Int = 40, expand: Bool = true, on_change: Callable = null) -> void {
+        super().__init()
+        self.first = first
+        self.second = second
+        self.vertical = vertical
+        self.ratio = _clamp(ratio, 0, 100)
+        self.min_size = min_size
+        self.expand = expand
+        self.on_change = on_change
+        self._drag = false
+        self.takes_clicks = true
+    }
+
+    define children(self) -> List {
+        return [self.first, self.second]
+    }
+
+    define _bar(self) -> Int {
+        return 6
+    }
+
+    define _span(self) -> Int {
+        if self.vertical { return self.height }
+        return self.width
+    }
+
+    // Size of the first pane in pixels.
+    define _first_px(self) -> Int {
+        room := self._span() - self._bar()
+        px := room * self.ratio / 100
+        lo := _min(self.min_size, room / 2)
+        return _clamp(px, lo, _max(lo, room - lo))
+    }
+
+    define measure(self, t: Theme) -> void {
+        self.first.measure(t)
+        self.second.measure(t)
+        if self.vertical {
+            self.min_w = _max(self.first.min_w, self.second.min_w)
+            self.min_h = 2 * self.min_size + self._bar()
+        } else {
+            self.min_w = 2 * self.min_size + self._bar()
+            self.min_h = _max(self.first.min_h, self.second.min_h)
+        }
+    }
+
+    define place(self, x: Int, y: Int, width: Int, height: Int) -> void {
+        self.x = x
+        self.y = y
+        self.width = width
+        self.height = height
+        a := self._first_px()
+        b := self._bar()
+        if self.vertical {
+            self.first.place(x, y, width, a)
+            self.second.place(x, y + a + b, width, _max(0, height - a - b))
+        } else {
+            self.first.place(x, y, a, height)
+            self.second.place(x + a + b, y, _max(0, width - a - b), height)
+        }
+    }
+
+    define _on_bar(self, px: Int, py: Int) -> Bool {
+        a := self._first_px()
+        if self.vertical { return py >= self.y + a and py < self.y + a + self._bar() }
+        return px >= self.x + a and px < self.x + a + self._bar()
+    }
+
+    define handle(self, e: window.Event) -> Bool {
+        if e.kind == "mouse_down" and e.button == 1 and self._on_bar(e.x, e.y) {
+            self._drag = true
+            return true
+        }
+        if e.kind == "mouse_move" and self._drag {
+            pos := e.x - self.x - self._bar() / 2
+            if self.vertical { pos = e.y - self.y - self._bar() / 2 }
+            room := _max(1, self._span() - self._bar())
+            nr := _clamp(pos * 100 / room, 0, 100)
+            if nr != self.ratio {
+                self.ratio = nr
+                if self.on_change != null { self.on_change(nr) }
+            }
+            return true
+        }
+        if e.kind == "mouse_up" {
+            self._drag = false
+            return true
+        }
+        return false
+    }
+
+    define draw(self, win: window.Window, t: Theme) -> void {
+        _clip_push(win, self.first.x, self.first.y, self.first.width, self.first.height)
+        if self.first.visible { self.first.draw(win, t) }
+        _clip_pop(win)
+        _clip_push(win, self.second.x, self.second.y, self.second.width, self.second.height)
+        if self.second.visible { self.second.draw(win, t) }
+        _clip_pop(win)
+        a := self._first_px()
+        bar := t.border
+        if self._drag or self.hovered { bar = t.accent }
+        if self.vertical {
+            win.rect(self.x, self.y + a + self._bar() / 2 - 1, self.width, 2, bar)
+        } else {
+            win.rect(self.x + a + self._bar() / 2 - 1, self.y, 2, self.height, bar)
+        }
+    }
+}

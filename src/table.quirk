@@ -1,0 +1,487 @@
+// ui: Table
+
+from typing.primitives.string use { String }
+from typing.collections.list use { List }
+use window
+from .util use { mix, _clamp, _max, _min }
+from .theme use { Theme }
+from .widget use { Widget, _clip_pop, _clip_push, _ink }
+from .text_input use { TextInput }
+from .list_view use { _draw_entry }
+from .access use { AccessNode, _entry_text }
+
+---
+Rows of values under column headers: `ui.Table(["Name", "Size"], rows)`,
+each row a List (anything with `.str()`). Columns size to their content
+(or set `widths`); click a row (or Up / Down) to select it, click a
+header to sort by that column (again: reverse). `on_select(index, row)`
+runs when the selection changes — `index` into `rows`, whatever the sort.
+With `editable=true` a cell can be changed in place: Left / Right pick
+the column, Enter / F2 or a double-click edit it, Enter saves, Escape
+cancels. The new value goes into `rows` (an Int column stays an Int when
+the text is a number) and `on_edit(index, column, value)` runs.
+---
+struct Table : Widget {
+    columns: List
+    rows: List
+    widths: List
+    selected: Int
+    on_select: Callable
+    visible_rows: Int
+    sort_column: Int
+    sort_descending: Bool
+    _order: List
+    _top: Int
+    _last_w: List
+    editable: Bool
+    column: Int
+    on_edit: Callable
+    _editor: TextInput
+    _edit_row: Int
+    _edit_col: Int
+    define access_action(self, action: String, value: String, node: AccessNode) -> Bool {
+        if action != "select" or node.index < 0 or not self.enabled { return false }
+        self.select(node.index)
+        return true
+    }
+
+    define access_role(self) -> String {
+        return "table"
+    }
+
+    define _a11y_children(self) -> List {
+        out := []
+        head := AccessNode("row", "", "", self.x, self.y, self.width, 0)
+        for col in self.columns {
+            head.children.append(AccessNode("columnheader", String(col)))
+        }
+        out.append(head)
+        i := 0
+        while i < self.rows.length() {
+            cells: List = self.rows[i]
+            row := AccessNode("row", "", "", self.x, self.y, self.width, 0)._item(self, i)
+            names := ""
+            for cell in cells {
+                txt := _entry_text(cell)
+                row.children.append(AccessNode("cell", txt))
+                if names != "" { names = names + ", " }
+                names = names + txt
+            }
+            row.name = names
+            if i == self.selected { row.states.append("selected") }
+            out.append(row)
+            i = i + 1
+        }
+        return out
+    }
+
+
+    define __init(self, columns: List, rows: List, on_select: Callable = null, visible_rows: Int = 8, expand: Bool = false, editable: Bool = false, on_edit: Callable = null) -> void {
+        super().__init()
+        self.columns = columns
+        self.rows = rows
+        self.widths = []
+        self.selected = -1
+        self.on_select = on_select
+        self.visible_rows = visible_rows
+        self.expand = expand
+        self.sort_column = -1
+        self.sort_descending = false
+        self._order = []
+        self._top = 0
+        self._last_w = []
+        self.editable = editable
+        self.column = 0
+        self.on_edit = on_edit
+        self._editor = TextInput("")
+        self._edit_row = -1
+        self._edit_col = -1
+        self.focusable = true
+    }
+
+    --- True while a cell is being edited. ---
+    define editing(self) -> Bool {
+        return self._edit_row >= 0
+    }
+
+    --- Edit cell (row index `r`, column `c`) in place. ---
+    define edit_cell(self, r: Int, c: Int) -> void {
+        if r < 0 or r >= self.rows.length() or c < 0 or c >= self.columns.length() { return }
+        self.select(r)
+        self.column = c
+        self._edit_row = r
+        self._edit_col = c
+        self._editor.text = self._cell(r, c)
+        self._editor.select_all()
+        self._editor._undo = []
+        self._editor.focused = true
+    }
+
+    --- Stop editing; `save` keeps the typed value. ---
+    define finish_edit(self, save: Bool = true) -> void {
+        if not self.editing() { return }
+        r := self._edit_row
+        c := self._edit_col
+        self._edit_row = -1
+        self._edit_col = -1
+        self._editor.focused = false
+        if not save { return }
+        row: List = self.rows[r]
+        while row.length() <= c { row.append("") }
+        text := self._editor.text
+        old := row[c]
+        value: Any = text
+        if type(old) == "Int" and self._numeric(text) { value = text.to_int() }
+        row[c] = value
+        self._order = []                          // re-sort with the new value
+        if self.on_edit != null { self.on_edit(r, c, value) }
+    }
+
+    // The cell rectangle of (row index r, column c) as [x, y, w, h], or [].
+    define _cell_rect(self, r: Int, c: Int) -> List {
+        order := self._ordered()
+        pos := -1
+        i := 0
+        while i < order.length() {
+            v: Int = order[i]
+            if v == r { pos = i }
+            i = i + 1
+        }
+        if pos < self._top or pos >= self._top + self._shown() or c >= self._last_w.length() { return [] }
+        x := self.x + 2
+        k := 0
+        while k < c {
+            w: Int = self._last_w[k]
+            x = x + w
+            k = k + 1
+        }
+        cw: Int = self._last_w[c]
+        rh := self._row_h()
+        return [x, self.y + 2 + rh + (pos - self._top) * rh, cw, rh]
+    }
+
+    define _row_h(self) -> Int {
+        return 24
+    }
+
+    define _shown(self) -> Int {
+        return _max(1, (self.height - self._row_h() - 4) / self._row_h())
+    }
+
+    // A whole-number cell ("42", "-7"), compared by value when sorting.
+    define _numeric(self, s: String) -> Bool {
+        if s.length() == 0 { return false }
+        if s.startswith("-") { return s.length() > 1 and s.substring(1, s.length()).is_digit() }
+        return s.is_digit()
+    }
+
+    define _cell(self, r: Int, c: Int) -> String {
+        row: List = self.rows[r]
+        if c >= row.length() { return "" }
+        return row[c].str()
+    }
+
+    // Row indices in display order (sorted when a header was clicked).
+    define _ordered(self) -> List {
+        if self._order.length() != self.rows.length() {
+            order := []
+            i := 0
+            while i < self.rows.length() {
+                order.append(i)
+                i = i + 1
+            }
+            self._order = order
+            if self.sort_column >= 0 { self._sort() }
+        }
+        return self._order
+    }
+
+    // a before b in the current sort: numbers by value, the rest as text.
+    define _before(self, a: Int, b: Int) -> Bool {
+        x := self._cell(a, self.sort_column)
+        y := self._cell(b, self.sort_column)
+        less := x < y
+        greater := x > y
+        if self._numeric(x) and self._numeric(y) {
+            xi := x.to_int()
+            yi := y.to_int()
+            less = xi < yi
+            greater = xi > yi
+        }
+        if self.sort_descending { return greater }
+        return less
+    }
+
+    define _sort(self) -> void {
+        // Insertion sort: stable, and tables are small.
+        order := self._order
+        i := 1
+        while i < order.length() {
+            cur: Int = order[i]
+            j := i - 1
+            while j >= 0 {
+                prev: Int = order[j]
+                if not self._before(cur, prev) { break }
+                order[j + 1] = prev
+                j = j - 1
+            }
+            order[j + 1] = cur
+            i = i + 1
+        }
+    }
+
+    --- Sort by column `c` (`descending` for largest / last first). ---
+    define sort_by(self, c: Int, descending: Bool = false) -> void {
+        self.sort_column = c
+        self.sort_descending = descending
+        self._ordered()
+        self._sort()
+    }
+
+    --- Select row `i` (an index into `rows`; -1: none); runs `on_select` if it changed. ---
+    define select(self, i: Int) -> void {
+        ni := _clamp(i, -1, self.rows.length() - 1)
+        if ni == self.selected { return }
+        self.selected = ni
+        if ni >= 0 {
+            pos := 0
+            order := self._ordered()
+            while pos < order.length() {
+                v: Int = order[pos]
+                if v == ni { break }
+                pos = pos + 1
+            }
+            if pos < self._top { self._top = pos }
+            if pos >= self._top + self._shown() { self._top = pos - self._shown() + 1 }
+            if self.on_select != null { self.on_select(ni, self.rows[ni]) }
+        }
+    }
+
+    define _col_widths(self, t: Theme) -> List {
+        out := []
+        c := 0
+        while c < self.columns.length() {
+            if c < self.widths.length() {
+                out.append(self.widths[c])
+            } else {
+                w := t.text_w(self.columns[c].str()) + 3 * t.char_w()
+                r := 0
+                while r < self.rows.length() {
+                    w = _max(w, t.text_w(self._cell(r, c)) + 2 * t.char_w())
+                    r = r + 1
+                }
+                out.append(_min(w, 40 * t.char_w()))
+            }
+            c = c + 1
+        }
+        return out
+    }
+
+    define measure(self, t: Theme) -> void {
+        total := 0
+        for w in self._col_widths(t) {
+            n: Int = w
+            total = total + n
+        }
+        self.min_w = total + 4
+        self.min_h = (self.visible_rows + 1) * self._row_h() + 4
+    }
+
+    // Display position under py (-1 for the header, -2 outside).
+    define _pos_at(self, py: Int) -> Int {
+        if py < self.y + 2 + self._row_h() { return -1 }
+        p := self._top + (py - self.y - 2 - self._row_h()) / self._row_h()
+        if p >= self.rows.length() { return -2 }
+        return p
+    }
+
+    define _col_at(self, px: Int) -> Int {
+        // Widths of the last draw.
+        x := self.x + 2
+        c := 0
+        while c < self._last_w.length() {
+            w: Int = self._last_w[c]
+            if px >= x and px < x + w { return c }
+            x = x + w
+            c = c + 1
+        }
+        return -1
+    }
+
+    define handle(self, e: window.Event) -> Bool {
+        if not self.enabled { return false }
+        if self.editing() {
+            rect := self._cell_rect(self._edit_row, self._edit_col)
+            inside := false
+            if rect.length() == 4 and (e.kind == "mouse_down" or e.kind == "mouse_move" or e.kind == "mouse_up") {
+                rx: Int = rect[0]
+                ry: Int = rect[1]
+                rw: Int = rect[2]
+                rhh: Int = rect[3]
+                inside = e.x >= rx and e.y >= ry and e.x < rx + rw and e.y < ry + rhh
+            }
+            if e.kind == "key_down" and (e.key == "return" or e.key == "keypad_enter") {
+                self.finish_edit(true)
+                return true
+            }
+            if e.kind == "key_down" and e.key == "escape" {
+                self.finish_edit(false)
+                return true
+            }
+            if e.kind == "key_down" or e.kind == "text" or e.kind == "compose" or inside or (e.kind != "mouse_down" and self._editor._dragging) {
+                self._editor.handle(e)
+                return true
+            }
+            if e.kind == "mouse_down" { self.finish_edit(true) }      // a click elsewhere saves
+        }
+        order := self._ordered()
+        if e.kind == "mouse_down" and e.button == 1 {
+            p := self._pos_at(e.y)
+            if p >= 0 and self.editable {
+                c := self._col_at(e.x)
+                if c >= 0 { self.column = c }
+                if e.clicks >= 2 and c >= 0 {
+                    r: Int = order[p]
+                    self.edit_cell(r, c)
+                    return true
+                }
+            }
+            if p == -1 {
+                c := self._col_at(e.x)
+                if c >= 0 { self.sort_by(c, c == self.sort_column and not self.sort_descending) }
+            } elif p >= 0 {
+                self.select(order[p])
+            }
+            return true
+        }
+        if e.kind == "mouse_up" { return true }
+        if e.kind == "wheel" {
+            most := _max(0, self.rows.length() - self._shown())
+            self._top = _clamp(self._top - e.dy, 0, most)
+            return true
+        }
+        if e.kind != "key_down" or self.rows.length() == 0 { return false }
+        cur := -1
+        i := 0
+        while i < order.length() {
+            v: Int = order[i]
+            if v == self.selected { cur = i }
+            i = i + 1
+        }
+        k := e.key
+        if self.editable and (k == "return" or k == "keypad_enter" or k == "f2") and self.selected >= 0 {
+            self.edit_cell(self.selected, self.column)
+            return true
+        }
+        if self.editable and k == "left" {
+            self.column = _max(0, self.column - 1)
+            return true
+        }
+        if self.editable and k == "right" {
+            self.column = _min(self.columns.length() - 1, self.column + 1)
+            return true
+        }
+        if k == "down" {
+            self.select(order[_min(order.length() - 1, cur + 1)])
+        } elif k == "up" {
+            self.select(order[_max(0, cur - 1)])
+        } elif k == "home" {
+            self.select(order[0])
+        } elif k == "end" {
+            self.select(order[order.length() - 1])
+        } else {
+            return false
+        }
+        return true
+    }
+
+    define draw(self, win: window.Window, t: Theme) -> void {
+        win.rect(self.x, self.y, self.width, self.height, t.input)
+        border := t.border
+        if self.focused { border = t.accent }
+        win.rect(self.x, self.y, self.width, self.height, border, fill=false)
+        ws := self._col_widths(t)
+        self._last_w = ws
+        rh := self._row_h()
+        order := self._ordered()
+        shown := self._shown()
+        most := _max(0, order.length() - shown)
+        if self._top > most { self._top = most }
+        _clip_push(win, self.x + 1, self.y + 1, self.width - 2, self.height - 2)
+        // Header.
+        hy := self.y + 2
+        win.rect(self.x + 2, hy, self.width - 4, rh, t.surface)
+        x := self.x + 2
+        c := 0
+        while c < self.columns.length() {
+            w: Int = ws[c]
+            label := self.columns[c].str()
+            if c == self.sort_column {
+                if self.sort_descending { label = label + " v" } else { label = label + " ^" }
+            }
+            win.text(label, x + t.char_w(), hy + (rh - t.line()) / 2, t.text, scale=t.scale, font=t.font)
+            if c > 0 { win.rect(x, hy + 4, 1, rh - 8, t.border) }
+            x = x + w
+            c = c + 1
+        }
+        win.rect(self.x + 2, hy + rh - 1, self.width - 4, 1, t.border)
+        // Rows.
+        p := self._top
+        while p < order.length() and p < self._top + shown {
+            ri: Int = order[p]
+            ry := hy + rh + (p - self._top) * rh
+            ink := t.text
+            if ri == self.selected {
+                win.rect(self.x + 2, ry, self.width - 4, rh, _ink(self, t.accent, t))
+                ink = t.accent_text
+            } elif (p - self._top) % 2 == 1 {
+                win.rect(self.x + 2, ry, self.width - 4, rh, mix(t.input, t.surface, 50))
+            }
+            x = self.x + 2
+            c = 0
+            while c < self.columns.length() {
+                w: Int = ws[c]
+                rowl: List = self.rows[ri]
+                if c < rowl.length() {
+                    _draw_entry(win, t, rowl[c], x + t.char_w(), ry, rh, w - 2 * t.char_w(), _ink(self, ink, t))
+                }
+                x = x + w
+                c = c + 1
+            }
+            p = p + 1
+        }
+        if self.editable and self.selected >= 0 and self.focused {
+            sel := self._cell_rect(self.selected, self.column)
+            if sel.length() == 4 {
+                sx: Int = sel[0]
+                sy: Int = sel[1]
+                sw: Int = sel[2]
+                shh: Int = sel[3]
+                win.rect(sx, sy, sw, shh, t.accent_text, fill=false)
+            }
+        }
+        if self.editing() {
+            if not self.focused {
+                self.finish_edit(true)                // focus moved away: keep the value
+            } else {
+                rect := self._cell_rect(self._edit_row, self._edit_col)
+                if rect.length() == 4 {
+                    ex: Int = rect[0]
+                    ey: Int = rect[1]
+                    ew: Int = rect[2]
+                    ehh: Int = rect[3]
+                    self._editor.measure(t)
+                    self._editor.place(ex, ey, ew, ehh)
+                    self._editor.draw(win, t)
+                }
+            }
+        }
+        _clip_pop(win)
+        if order.length() > shown {
+            track := self.height - rh - 4
+            bar := _max(8, track * shown / order.length())
+            by := self.y + 2 + rh + (track - bar) * self._top / _max(1, most)
+            win.rect(self.x + self.width - 5, by, 3, bar, t.muted)
+        }
+    }
+}

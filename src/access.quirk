@@ -1,0 +1,161 @@
+// ui: AccessNode, AccessEvent: the accessibility tree
+
+from typing.primitives.string use { String }
+from typing.collections.list use { List }
+from .widget use { Widget }
+from .list_view use { ListItem }
+
+---
+One thing in the accessibility tree (`App.accessibility()`) — what a
+screen reader is told about a widget or one of its items: `role`
+("button", "checkbox", "textbox", "list", "listitem", "tab", "menuitem",
+...), `name` (what it's called), `value` (a field's text, a slider's
+number, the selected option), `description`, `states` ("focused",
+"disabled", "checked", "selected", "expanded"...), its box, `children`,
+and the `widget` it came from (null for items). `level` is the depth of
+a tree item.
+---
+struct AccessNode {
+    role: String
+    name: String
+    value: String
+    description: String
+    states: List
+    x: Int
+    y: Int
+    width: Int
+    height: Int
+    level: Int
+    children: List
+    widget: Widget
+    id: Int
+    index: Int
+    data: Any
+
+    define __init(self, role: String, name: String = "", value: String = "", x: Int = 0, y: Int = 0, width: Int = 0, height: Int = 0) -> void {
+        self.role = role
+        self.name = name
+        self.value = value
+        self.description = ""
+        self.states = []
+        self.x = x
+        self.y = y
+        self.width = width
+        self.height = height
+        self.level = 0
+        self.children = []
+        self.widget = null
+        self.id = 0
+        self.index = -1
+        self.data = null
+    }
+
+    // The widget's id; items get theirs from App (by parent and position).
+    define _item(self, owner: Widget, index: Int) -> AccessNode {
+        self.widget = owner
+        self.index = index
+        return self
+    }
+
+    --- True if `state` ("focused", "checked"...) is one of its states. ---
+    define has(self, state: String) -> Bool {
+        for st in self.states {
+            s: String = st
+            if s == state { return true }
+        }
+        return false
+    }
+
+    --- The first node (this one or below) named `name` — and with `role`, when given — or null. ---
+    define find(self, name: String, role: String = "") -> AccessNode {
+        if self.name == name and (role == "" or self.role == role) { return self }
+        for c in self.children {
+            cn: AccessNode = c
+            hit := cn.find(name, role)
+            if hit != null { return hit }
+        }
+        return null
+    }
+
+    --- The first node (this one or below) with `state` (e.g. "focused"), or null. ---
+    define find_state(self, state: String) -> AccessNode {
+        if self.has(state) { return self }
+        for c in self.children {
+            cn: AccessNode = c
+            hit := cn.find_state(state)
+            if hit != null { return hit }
+        }
+        return null
+    }
+
+    --- One line: `button "Save" [focusable, focused]`, with `= value` when it has one. ---
+    define describe(self) -> String {
+        out := self.role
+        if self.name != "" { out = out + " \"" + self.name + "\"" }
+        if self.value != "" { out = out + " = \"" + self.value + "\"" }
+        if self.states.length() > 0 {
+            parts := ""
+            for st in self.states {
+                s: String = st
+                if parts != "" { parts = parts + ", " }
+                parts = parts + s
+            }
+            out = out + " [" + parts + "]"
+        }
+        return out
+    }
+
+    --- The whole subtree, one `describe()` line per node, indented — for tests and debugging. ---
+    define dump(self, indent: Int = 0) -> String {
+        out := " " * (indent * 2) + self.describe() + "\n"
+        for c in self.children {
+            cn: AccessNode = c
+            out = out + cn.dump(indent + 1)
+        }
+        return out
+    }
+
+    define __str(self) -> String {
+        return self.describe()
+    }
+}
+
+---
+A change assistive technology should hear about (`App.on_access`):
+`kind` is "focus" (keyboard focus moved to `node`), "value" (the focused
+widget's name, value or states changed) or "announce" (`App.announce`:
+`node.name` is the message).
+---
+struct AccessEvent {
+    kind: String
+    node: AccessNode
+
+    define __init(self, kind: String, node: AccessNode) -> void {
+        self.kind = kind
+        self.node = node
+    }
+}
+
+// The node a screen reader's focus is on when widget node `wn` has the
+// keyboard focus: the selected item of a list-like widget, else `wn`.
+define _a11y_focus_item(wn: AccessNode) -> AccessNode {
+    r := wn.role
+    if r != "list" and r != "tree" and r != "tablist" and r != "radiogroup" and r != "table" { return wn }
+    state := r == "radiogroup" ? "checked" : "selected"
+    for c in wn.children {
+        cn: AccessNode = c
+        if cn.role == "tabpanel" { continue }
+        hit := cn.find_state(state)
+        if hit != null { return hit }
+    }
+    return wn
+}
+
+// A list / table entry as text (a ListItem's text, or the value).
+define _entry_text(v: Any) -> String {
+    if v != null and type(v) == "ListItem" {
+        li: ListItem = v
+        return li.text
+    }
+    return String(v)
+}

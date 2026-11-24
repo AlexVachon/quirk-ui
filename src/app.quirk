@@ -1,0 +1,1138 @@
+// ui: App: the window, event dispatch, focus, timers
+
+from typing.primitives.string use { String }
+from typing.collections.list use { List }
+use window
+use fs
+use sys
+from .util use { mix, _a11y_counter, _clamp, _clips, _max, _popups }
+from .theme use { dark, Theme }
+from .widget use { Widget, _focused_in }
+from .layout use { Column }
+from .menus use { Menu, MenuBar, MenuItem, _all_menu_bars }
+from .preview use { preview_event }
+from .animation use { Animation, ease }
+from .title_bar use { TitleBar }
+from .access use { AccessEvent, AccessNode, _a11y_focus_item }
+
+// Visible, enabled, focusable widgets in tree order (Tab order).
+define _focus_chain(w: Widget, out: List) -> void {
+    if not w.visible { return }
+    if w.focusable and w.enabled { out.append(w) }
+    for c in w.children() { _focus_chain(c, out) }
+}
+
+// The deepest visible widget at (px, py) that takes clicks (focusable,
+// or `takes_clicks`), or null.
+define _hit(w: Widget, px: Int, py: Int) -> Widget {
+    if not w.visible or not w.contains(px, py) { return null }
+    kids := w.children()
+    i := kids.length() - 1
+    while i >= 0 {
+        found := _hit(kids[i], px, py)
+        if found != null { return found }
+        i = i - 1
+    }
+    if w.focusable or w.takes_clicks { return w }
+    return null
+}
+
+// Every visible widget containing (px, py), outermost first.
+define _path(w: Widget, px: Int, py: Int, out: List) -> void {
+    if not w.visible or not w.contains(px, py) { return }
+    out.append(w)
+    kids := w.children()
+    i := kids.length() - 1
+    while i >= 0 {
+        before := out.length()
+        _path(kids[i], px, py, out)
+        if out.length() > before { return }
+        i = i - 1
+    }
+}
+
+// The deepest widget at (px, py) with a tooltip, or null.
+define _tip_at(w: Widget, px: Int, py: Int) -> Widget {
+    path := []
+    _path(w, px, py, path)
+    i := path.length() - 1
+    while i >= 0 {
+        c: Widget = path[i]
+        if c.tooltip_at(px, py).length() > 0 { return c }
+        i = i - 1
+    }
+    return null
+}
+
+define _close_popups() -> void {
+    while _popups.length() > 0 {
+        o: Widget = _popups[_popups.length() - 1]
+        o.close_popup()
+        if _popups.length() > 0 {
+            top: Widget = _popups[_popups.length() - 1]
+            if top == o { _popups.pop() }
+        }
+    }
+}
+
+define _list_has(items: List, x: Any) -> Bool {
+    for it in items {
+        if it == x { return true }
+    }
+    return false
+}
+
+define _clear_hover(w: Widget) -> void {
+    w.hovered = false
+    for c in w.children() { _clear_hover(c) }
+}
+
+---
+A timer from `app.every(ms, fn)` / `app.after(ms, fn)`: `fn()` runs on
+the App's loop, between frames. It doesn't draw a frame by itself: call
+`app.redraw()` in it when it changed something. `cancel()` stops it.
+---
+struct Timer {
+    interval: Int            // ms between runs (0: once)
+    action: Callable
+    due: Int                 // when it runs next (window.ticks())
+    active: Bool
+
+    define __init(self, interval: Int, action: Callable, due: Int) -> void {
+        self.interval = interval
+        self.action = action
+        self.due = due
+        self.active = true
+    }
+
+    --- Don't run it again. ---
+    define cancel(self) -> void {
+        self.active = false
+    }
+}
+
+// What an App with a title bar lays out: the bar on top, `body` (the
+// App's root) in the rest.
+struct _Frame : Widget {
+    bar: TitleBar
+    body: Widget
+
+    define __init(self, bar: TitleBar) -> void {
+        super().__init()
+        self.bar = bar
+        self.body = null
+    }
+
+    define children(self) -> List {
+        if self.body == null { return [self.bar] }
+        return [self.body, self.bar]
+    }
+
+    define access_role(self) -> String {
+        return "group"
+    }
+
+    define measure(self, t: Theme) -> void {
+        self.bar.measure(t)
+        self.min_w = self.bar.min_w
+        self.min_h = self.bar.min_h
+        if self.body != null {
+            self.body.measure(t)
+            self.min_w = _max(self.min_w, self.body.min_w)
+            self.min_h = self.min_h + self.body.min_h
+        }
+    }
+
+    define place(self, x: Int, y: Int, width: Int, height: Int) -> void {
+        self.x = x
+        self.y = y
+        self.width = width
+        self.height = height
+        bh := self.bar.min_h
+        self.bar.place(x, y, width, bh)
+        if self.body != null { self.body.place(x, y + bh, width, _max(0, height - bh)) }
+    }
+
+    define draw(self, win: window.Window, t: Theme) -> void {
+        if self.body != null { self.body.draw(win, t) }
+        self.bar.draw(win, t)
+    }
+}
+
+---
+A window showing a widget tree. Set `root`, then `run()`.
+  `theme`     — colours (`ui.dark()` by default)
+  `on_frame`  — optional `fn()` called once per frame before drawing
+  `focus`     — the widget with the keyboard focus (or null)
+  `tooltip_delay` — ms the mouse rests on a widget before its tooltip shows
+  `on_key`    — optional `fn(e)` called for every key press, before the
+                focused widget sees it (shortcuts: `if e.ctrl and e.key == "s"`);
+                returning true keeps the key from the focused widget
+`step()` runs one frame yourself (custom loops, tests).
+---
+
+struct App {
+    win: window.Window
+    root: Widget
+    theme: Theme
+    focus: Widget
+    on_frame: Callable
+    on_key: Callable
+    tooltip_delay: Int
+    _capture: Widget
+    _tip: Widget
+    _tip_since: Int
+    _tip_text: String        // what the tooltip says (a new text waits the delay again)
+    _mx: Int
+    _my: Int
+    _drag_src: Widget
+    _drag_from_x: Int
+    _drag_from_y: Int
+    _drag_data: Any
+    _dragging: Bool
+    _anims: List
+    on_access: Callable
+    _a11y_focus: Widget
+    _a11y_key: String
+    _a11y_last: AccessNode
+    _a11y_ids: Map
+    _a11y_nodes: Map
+    _a11y_reported: Widget
+    _a11y_focus_id: Int
+    _a11y_sent_focus: Int
+    _dirty: Bool             // something changed since the last frame drawn
+    _pending: List           // events read while waiting (run), for the next step
+    _drew: Bool              // the last step drew a frame
+    _tip_shown: Bool         // the pending tooltip has been drawn
+    title_bar: TitleBar      // with `title_bar=true`: the program's own (else null)
+    _frame: _Frame
+    _hit_key: String         // the title bar's areas last told the window
+    _timers: List
+    _wake_draws: Bool        // the wake _next_wake gave is for a frame (not just a timer)
+    _pv_dir: String          // QUIRK_UI_PREVIEW: a folder an IDE shows this app through ("": not previewed)
+    _pv_off: Int             // how much of <folder>/events was read
+    _pv_n: Int               // frames written
+
+    define __init(self, title: String, width: Int, height: Int, theme: Theme = null, resizable: Bool = true, headless: Bool = false, title_bar: Bool = false) -> void {
+        // Previewed (an IDE's live view): no window of its own, at the
+        // view's size; each frame drawn goes to <folder>/frame.bmp, the
+        // view's mouse and keys come from <folder>/events.
+        self._pv_dir = sys.env("QUIRK_UI_PREVIEW")
+        self._pv_off = 0
+        self._pv_n = 0
+        w := width
+        h := height
+        hl := headless
+        if self._pv_dir != "" {
+            hl = true
+            size := sys.env("QUIRK_UI_PREVIEW_SIZE").split("x")
+            if size.length() == 2 {
+                try {
+                    w = _max(100, Int(String(size[0])))
+                    h = _max(100, Int(String(size[1])))
+                } catch (Exception) {
+                    w = width
+                    h = height
+                }
+            }
+            self._preview_start()
+        }
+        self.win = window.open(title, w, h, resizable=resizable, headless=hl, borderless=title_bar)
+        self.root = Column([])
+        self.title_bar = null
+        self._frame = null
+        self._hit_key = ""
+        self._timers = []
+        self._wake_draws = true
+        if title_bar {
+            self.title_bar = TitleBar(self.win, on_close=fn() { self.close() })
+            self._frame = _Frame(self.title_bar)
+        }
+        if theme == null {
+            self.theme = dark()
+        } else {
+            self.theme = theme
+        }
+        self.focus = null
+        self._dirty = true
+        self._pending = []
+        self._drew = false
+        self._tip_shown = false
+        self.on_frame = null
+        self.on_key = null
+        self.tooltip_delay = 500
+        self._capture = null
+        self._tip = null
+        self._tip_text = ""
+        self._tip_since = 0
+        self._mx = -1
+        self._my = -1
+        self._drag_src = null
+        self._drag_from_x = 0
+        self._drag_from_y = 0
+        self._drag_data = null
+        self._dragging = false
+        self._anims = []
+        self.on_access = null
+        self._a11y_focus = null
+        self._a11y_key = ""
+        self._a11y_last = null
+        self._a11y_ids = {}
+        self._a11y_nodes = {}
+        self._a11y_reported = null
+        self._a11y_focus_id = 0
+        self._a11y_sent_focus = 0
+        _close_popups()
+    }
+
+    ---
+    The window as assistive technology (a screen reader) sees it: a tree
+    of `AccessNode`s — role, name, value, states and box of every visible
+    widget and item, open popups (menus, dropdown lists) last. Rebuilt on
+    each call.
+    @example
+    print(app.accessibility().dump())
+    ---
+    define accessibility(self) -> AccessNode {
+        top := AccessNode("window", self.win.title, "", 0, 0, self.win.width(), self.win.height())
+        if self.win.is_open() and self._tree() != null {
+            rn := self._tree().access_node()
+            if rn != null { top.children.append(rn) }
+            for pw in _popups {
+                pop: Widget = pw
+                pn := pop.access_node()
+                if pn != null and not (pop == self._tree()) { top.children.append(pn) }
+            }
+        }
+        if self.focus != null and self.focus.focused {
+            top.states.append("active")
+        }
+        return top
+    }
+
+    ---
+    Have assistive technology say `message` (an "announce" event to
+    `on_access`) — for things that happen without a focus change: "Saved",
+    "3 results".
+    ---
+    define announce(self, message: String) -> void {
+        if self.on_access != null { self.on_access(AccessEvent("announce", AccessNode("alert", message))) }
+        self.win.access_announce(message)
+    }
+
+    // Give every node an id (widgets have theirs; items get one per parent
+    // and position, kept across frames) and remember them by id.
+    define _a11y_number(self, node: AccessNode, parent_id: Int, pos: Int) -> void {
+        if node.id == 0 {
+            key := String(parent_id) + "/" + String(pos)
+            if self._a11y_ids.has(key) {
+                v: Int = self._a11y_ids[key]
+                node.id = v
+            } else {
+                _a11y_counter[0] = _a11y_counter[0] + 1
+                node.id = _a11y_counter[0]
+                self._a11y_ids[key] = node.id
+            }
+        }
+        self._a11y_nodes[String(node.id)] = node
+        i := 0
+        for c in node.children {
+            cn: AccessNode = c
+            self._a11y_number(cn, node.id, i)
+            i = i + 1
+        }
+    }
+
+    // The tree as the flat arrays Window.access_update takes.
+    define _a11y_flatten(self, node: AccessNode, parent: Int, out: List) -> void {
+        ids: List = out[0]
+        me := ids.length()
+        ids.append(node.id)
+        pl: List = out[1]
+        pl.append(parent)
+        rl: List = out[2]
+        rl.append(node.role)
+        nl: List = out[3]
+        nl.append(node.name)
+        vl: List = out[4]
+        vl.append(node.value)
+        dl: List = out[5]
+        dl.append(node.description)
+        bits := 0
+        for st in node.states {
+            s: String = st
+            if s == "focusable" { bits = bits + 1 }
+            elif s == "focused" { bits = bits + 2 }
+            elif s == "disabled" { bits = bits + 4 }
+            elif s == "checked" { bits = bits + 8 }
+            elif s == "selected" { bits = bits + 16 }
+            elif s == "expanded" { bits = bits + 32 }
+            elif s == "collapsed" { bits = bits + 64 }
+            elif s == "editable" { bits = bits + 128 }
+            elif s == "multiline" { bits = bits + 256 }
+        }
+        sl: List = out[6]
+        sl.append(bits)
+        bl: List = out[7]
+        bl.append(node.x)
+        bl.append(node.y)
+        bl.append(node.width)
+        bl.append(node.height)
+        ml: List = out[8]
+        ml.append(node.level)
+        rng := []
+        if node.widget != null and node.index < 0 { rng = node.widget._a11y_range() }
+        if rng.length() == 3 {
+            ml.append(rng[0])
+            ml.append(rng[1])
+            ml.append(rng[2])
+        } else {
+            ml.append(0)
+            ml.append(0)
+            ml.append(0)
+        }
+        for c in node.children {
+            cn: AccessNode = c
+            self._a11y_flatten(cn, me, out)
+        }
+    }
+
+    ---
+    The tree with ids (`AccessNode.id`), as last sent to a screen reader
+    — also what `access` events' targets refer to. Rebuilt on each call.
+    ---
+    define accessibility_with_ids(self) -> AccessNode {
+        tree := self.accessibility()
+        tree.id = -1
+        self._a11y_nodes = {}
+        self._a11y_number(tree, 0, 0)
+        return tree
+    }
+
+    // While a screen reader reads the window: send it the tree. In a
+    // list, tree, tab strip, radio group or table the screen reader's focus
+    // is the selected item (it then says "photo.png, list item" or
+    // "Advanced, tab item, selected", and a new selection is a focus move)
+    // — as native Windows controls do.
+    define _a11y_sync(self) -> void {
+        if not self.win.access_active() { return }
+        tree := self._a11y_prepare()
+        out := [[], [], [], [], [], [], [], [], []]
+        self._a11y_flatten(tree, -1, out)
+        self.win.access_update(out[0], out[1], out[2], out[3], out[4], out[5], out[6], out[7], out[8])
+    }
+
+    // The tree with ids, the screen reader's focus moved onto a selected item.
+    define _a11y_prepare(self) -> AccessNode {
+        tree := self.accessibility_with_ids()
+        self._a11y_focus_id = 0
+        f := self.focus
+        if f != null and f.focused and self._a11y_nodes.has(String(f.access_id())) {
+            wn: AccessNode = self._a11y_nodes[String(f.access_id())]
+            target := _a11y_focus_item(wn)
+            if target != wn {
+                kept := []
+                for st in wn.states {
+                    s: String = st
+                    if s != "focused" { kept.append(s) }
+                }
+                wn.states = kept
+                target.states.append("focused")
+            }
+            self._a11y_focus_id = target.id
+        }
+        return tree
+    }
+
+    // A screen reader's request (an "access" event).
+    define _access_do(self, e: window.Event) -> void {
+        key := String(e.target)
+        if not self._a11y_nodes.has(key) { self.accessibility_with_ids() }
+        if not self._a11y_nodes.has(key) { return }
+        node: AccessNode = self._a11y_nodes[key]
+        w := node.widget
+        if w == null { return }
+        if e.action == "focus" {
+            if w.focusable and w.enabled { self.focus_on(w) }
+            return
+        }
+        w.access_action(e.action, e.text, node)
+    }
+
+    // After a frame: tell `on_access` when focus moved, or the focused
+    // widget's name / value / states changed.
+    define _a11y_check(self) -> void {
+        active := self.win.access_active()
+        if self.on_access == null and not active { return }
+        f := self.focus
+        if f == null {
+            self._a11y_focus = null
+            return
+        }
+        // The screen reader's focus (the widget, or its selected item).
+        moved := false
+        if active and self._a11y_focus_id != 0 and self._a11y_focus_id != self._a11y_sent_focus {
+            self.win.access_focus(self._a11y_focus_id)
+            self._a11y_sent_focus = self._a11y_focus_id
+            moved = true
+        }
+        if f != self._a11y_focus {
+            self.accessibility()                  // names fields from the Labels before them
+            node := f.access_node()
+            self._a11y_focus = f
+            if node == null { return }
+            self._a11y_key = node.describe()
+            self._a11y_last = node
+            // Focus that left for nothing and came back isn't news.
+            if f != self._a11y_reported {
+                self._a11y_reported = f
+                if self.on_access != null { self.on_access(AccessEvent("focus", node)) }
+            }
+            return
+        }
+        node := f.access_node()
+        if node == null { return }
+        k := node.describe()
+        if k != self._a11y_key {
+            self._a11y_key = k
+            if self.on_access != null { self.on_access(AccessEvent("value", node)) }
+            // (A new selection in a list-like widget was a focus move above.)
+            if active and not moved and self._a11y_focus_id == node.id {
+                before := self._a11y_last
+                if before == null or before.value != node.value { self.win.access_changed(node.id, "value") }
+                if before == null or before.name != node.name { self.win.access_changed(node.id, "name") }
+                if before == null or before.has("checked") != node.has("checked") { self.win.access_changed(node.id, "checked") }
+                if before == null or before.has("expanded") != node.has("expanded") { self.win.access_changed(node.id, "expanded") }
+            }
+            self._a11y_last = node
+        }
+    }
+
+    ---
+    Animate over `duration` ms: `on_step(t)` runs every frame with the
+    eased progress `t` (0.0 → 1.0; the last call is exactly 1.0), then
+    `on_done()`. `ease` is "linear", "in", "out", "in_out" or "back".
+    @example
+    app.animate(300, fn(t) { panel.x_offset = ui.lerp(-200, 0, t) }, ease="out")
+    ---
+    define animate(self, duration: Int, on_step: Callable, ease: String = "in_out", on_done: Callable = null) -> Animation {
+        a := Animation(duration, on_step, ease, on_done)
+        self._anims.append(a)
+        return a
+    }
+
+    --- True while an animation is running. ---
+    define animating(self) -> Bool {
+        for a in self._anims {
+            an: Animation = a
+            if not an.done { return true }
+        }
+        return false
+    }
+
+    define _run_animations(self) -> void {
+        if self._anims.length() == 0 { return }
+        now := window.ticks()
+        live := []
+        for a in self._anims {
+            an: Animation = a
+            if an._tick(now) { live.append(an) }
+        }
+        self._anims = live
+    }
+
+    --- True while something is being dragged (see `Widget.on_drag`). ---
+    define dragging(self) -> Bool {
+        return self._dragging
+    }
+
+    // Menus whose shortcuts apply now.
+    define _shortcut_menus(self, w: Widget, out: List) -> void {
+        if not w.visible or not w.enabled { return }
+        if w.context_menu != null and _focused_in(w) != null { out.append(w.context_menu) }
+        for c in w.children() {
+            cw: Widget = c
+            self._shortcut_menus(cw, out)
+        }
+    }
+
+    // Run the enabled menu item whose shortcut is `e`; true if one did.
+    define _run_shortcut(self, e: window.Event) -> Bool {
+        menus := []
+        self._shortcut_menus(self._tree(), menus)
+        for b in _all_menu_bars(self._tree()) {
+            bar: MenuBar = b
+            for m in bar.menus { menus.append(m) }
+        }
+        for mm in menus {
+            menu: Menu = mm
+            for it in menu.items {
+                item: MenuItem = it
+                if item.enabled and not item.is_separator() and item.matches(e) {
+                    if item.on_click != null { item.on_click() }
+                    return true
+                }
+            }
+        }
+        return false
+    }
+
+    // The innermost widget at (px, py) that something can be dropped on.
+    define _drop_target(self, px: Int, py: Int) -> Widget {
+        path := []
+        _path(self._tree(), px, py, path)
+        i := path.length() - 1
+        while i >= 0 {
+            w: Widget = path[i]
+            if w.on_drop != null and w.enabled { return w }
+            i = i - 1
+        }
+        return null
+    }
+
+    --- True until the window is closed. ---
+    define is_open(self) -> Bool {
+        return self.win.is_open()
+    }
+
+    --- Close the window (ends `run`). ---
+    define close(self) -> void {
+        self.win.close()
+    }
+
+    --- Give `w` the keyboard focus (null: nobody). ---
+    define focus_on(self, w: Widget) -> void {
+        if w != self.focus { _close_popups() }
+        if self.focus != null { self.focus.focused = false }
+        self.focus = w
+        if w != null { w.focused = true }
+    }
+
+    define _cycle_focus(self, backwards: Bool) -> void {
+        chain := []
+        _focus_chain(self._tree(), chain)
+        if chain.length() == 0 { return }
+        idx := -1
+        i := 0
+        for c in chain {
+            if c.focused { idx = i }
+            i = i + 1
+        }
+        next := 0
+        if backwards {
+            next = chain.length() - 1
+            if idx > 0 { next = idx - 1 }
+        } elif idx >= 0 {
+            next = (idx + 1) % chain.length()
+        }
+        self.focus_on(chain[next])
+    }
+
+    // What's laid out and drawn: `root`, under the title bar if there's one.
+    define _tree(self) -> Widget {
+        if self._frame == null { return self.root }
+        self._frame.body = self.root
+        return self._frame
+    }
+
+    --- Measure and place the tree to fill the window. ---
+    define layout(self) -> void {
+        tree := self._tree()
+        tree.measure(self.theme)
+        if self.title_bar == null {
+            tree.place(0, 0, self.win.width(), self.win.height())
+        } else {
+            // Maximized on Windows, the window overhangs the screen: keep
+            // the bar (and the rest) inside what's visible.
+            m := self.win.inset()
+            l: Int = m[0]
+            tp: Int = m[1]
+            r: Int = m[2]
+            b: Int = m[3]
+            tree.place(l, tp, _max(0, self.win.width() - l - r), _max(0, self.win.height() - tp - b))
+            // Tell the window where the bar drags it (only when that moved).
+            bar := self.title_bar
+            holes := bar.holes()
+            key := String(bar.x) + "," + String(bar.y) + " " + String(bar.width) + "x" + String(bar.height) + String(holes)
+            if key != self._hit_key {
+                self._hit_key = key
+                self.win.set_hit_areas([[bar.x, bar.y, bar.width, bar.height]], holes)
+            }
+        }
+    }
+
+    --- Route one event to the widget it's for (also usable from tests). ---
+    define dispatch(self, e: window.Event) -> void {
+        k := e.kind
+        if k == "access" {
+            self._access_do(e)
+            return
+        }
+        if self.title_bar != null and (k == "focus" or k == "blur") { self.title_bar.active = k == "focus" }
+        if k == "mouse_move" or k == "mouse_down" or k == "mouse_up" or k == "wheel" or k == "key_down" or k == "blur" {
+            if k == "mouse_move" {
+                self._mx = e.x
+                self._my = e.y
+                tip := _tip_at(self._tree(), e.x, e.y)
+                text := tip != null ? tip.tooltip_at(e.x, e.y) : ""
+                if tip != self._tip or text != self._tip_text {
+                    self._tip = tip
+                    self._tip_text = text
+                    self._tip_since = window.ticks()
+                }
+            } else {
+                self._tip_since = -1      // hidden until the mouse moves to another widget
+            }
+        }
+        // An open popup gets the mouse first; a click anywhere else closes it.
+        if _popups.length() > 0 and (k == "mouse_move" or k == "mouse_down" or k == "mouse_up" or k == "wheel") {
+            top: Widget = _popups[_popups.length() - 1]
+            px := e.x
+            py := e.y
+            if k == "wheel" {
+                px = self.win.mouse().0
+                py = self.win.mouse().1
+            }
+            if top.popup_contains(px, py) {
+                _clear_hover(self._tree())
+                top.popup_handle(e)
+                return
+            }
+            if k == "mouse_down" {
+                owner := _hit(self._tree(), e.x, e.y)
+                _close_popups()
+                // A click on the popup's own field just closes it.
+                if owner == top {
+                    self._capture = owner
+                    return
+                }
+            }
+        }
+        // Drag and drop: past 4 px of movement with the button held, the
+        // pressed widget's `on_drag` data travels to an `on_drop` target.
+        if k == "mouse_move" and self._drag_src != null and e.left and not self._dragging {
+            dx := e.x - self._drag_from_x
+            dy := e.y - self._drag_from_y
+            if dx * dx + dy * dy > 16 {
+                self._drag_data = self._drag_src.on_drag()
+                if self._drag_data != null {
+                    self._dragging = true
+                    if self._capture != null { self._capture.pressed = false }
+                } else {
+                    self._drag_src = null
+                }
+            }
+        }
+        if k == "mouse_up" and self._dragging {
+            target := self._drop_target(e.x, e.y)
+            data := self._drag_data
+            self._dragging = false
+            self._drag_src = null
+            self._drag_data = null
+            if self._capture != null {
+                cap := self._capture
+                self._capture = null
+                cap.pressed = false
+                // Released somewhere else: no click.
+                ev := window.Event("mouse_up")
+                ev.x = -100000
+                ev.y = -100000
+                ev.button = e.button
+                cap.handle(ev)
+            }
+            if target != null { target.on_drop(data) }
+            return
+        }
+        if k == "mouse_up" { self._drag_src = null }
+        if k == "mouse_move" {
+            _clear_hover(self._tree())
+            over := _hit(self._tree(), e.x, e.y)
+            if over != null { over.hovered = true }
+            if self._capture != null { self._capture.handle(e) }
+            return
+        }
+        // Right-click: the context menu of the innermost widget that has one.
+        if k == "mouse_down" and e.button == 3 {
+            path := []
+            _path(self._tree(), e.x, e.y, path)
+            i := path.length() - 1
+            while i >= 0 {
+                w: Widget = path[i]
+                if w.context_menu != null and w.enabled {
+                    _close_popups()
+                    // The widget sees the click first: a list or a tree selects
+                    // the row it's on, so the menu is about that row.
+                    w.handle(e)
+                    w.context_menu.open_at(e.x, e.y)
+                    return
+                }
+                i = i - 1
+            }
+            return
+        }
+        if k == "mouse_down" and e.button == 1 {
+            path := []
+            _path(self._tree(), e.x, e.y, path)
+            self._drag_src = null
+            i := path.length() - 1
+            while i >= 0 {
+                w: Widget = path[i]
+                if w.on_drag != null and w.enabled {
+                    self._drag_src = w
+                    self._drag_from_x = e.x
+                    self._drag_from_y = e.y
+                    break
+                }
+                i = i - 1
+            }
+        }
+        if k == "mouse_down" {
+            target := _hit(self._tree(), e.x, e.y)
+            if target != null and target.enabled {
+                if target.focusable { self.focus_on(target) }
+                self._capture = target
+                target.handle(e)
+            } else {
+                self.focus_on(null)
+            }
+            return
+        }
+        if k == "mouse_up" {
+            if self._capture != null {
+                cap := self._capture
+                self._capture = null
+                cap.handle(e)
+            }
+            return
+        }
+        if k == "wheel" {
+            // Innermost widget under the mouse that uses it (a list inside a
+            // scroll view scrolls itself; elsewhere the scroll view scrolls).
+            path := []
+            mx := self.win.mouse().0
+            my := self.win.mouse().1
+            if self._mx >= 0 {
+                mx = self._mx
+                my = self._my
+            }
+            _path(self._tree(), mx, my, path)
+            i := path.length() - 1
+            while i >= 0 {
+                w: Widget = path[i]
+                if w.enabled and w.handle(e) { return }
+                i = i - 1
+            }
+            return
+        }
+        // An input method composing in the focused field gets every key
+        // (no shortcuts, no Tab) until it's done.
+        if (k == "key_down" or k == "key_up" or k == "compose" or k == "text") and self.focus != null and self.focus.composing() {
+            self.focus.handle(e)
+            return
+        }
+        // on_key returning true keeps the key from everyone else (an app's
+        // own shortcut — not typed into the focused terminal / field too).
+        if k == "key_down" and self.on_key != null {
+            used := self.on_key(e)
+            if used == true { return }
+        }
+        // Menu shortcuts: from any menu bar, and the right-click menus of the
+        // focused widget and those around it. Not while a popup is open.
+        if k == "key_down" and _popups.length() == 0 and self._run_shortcut(e) { return }
+        // An open popup that takes keys (a menu) gets them first.
+        if (k == "key_down" or k == "key_up" or k == "text" or k == "compose") and _popups.length() > 0 {
+            top: Widget = _popups[_popups.length() - 1]
+            if top.popup_key(e) { return }
+        }
+        if k == "key_down" and e.key == "tab" and not e.ctrl and not (self.focus != null and self.focus.takes_tab) {
+            self._cycle_focus(e.shift)
+            return
+        }
+        if k == "key_down" or k == "key_up" or k == "text" or k == "compose" {
+            if self.focus != null and self.focus.visible and self.focus.enabled { self.focus.handle(e) }
+            return
+        }
+        if k == "blur" {
+            _clear_hover(self._tree())
+        }
+    }
+
+    --- One frame: handle events, lay out, draw, present. False once the window is closed. ---
+    --- Draw again at the next frame — after changing widgets outside an event (a timer, a task). ---
+    define redraw(self) -> void {
+        self._dirty = true
+    }
+
+    ---
+    Run `action()` every `ms` milliseconds while the App runs (polling
+    something: a process's output, a file). Returns the `Timer`.
+    @example app.every(50, fn() { term.poll() })
+    ---
+    define every(self, ms: Int, action: Callable) -> Timer {
+        t := Timer(_max(1, ms), action, window.ticks() + _max(1, ms))
+        self._timers.append(t)
+        return t
+    }
+
+    --- Run `action()` once, `ms` milliseconds from now. Returns the `Timer`. ---
+    define after(self, ms: Int, action: Callable) -> Timer {
+        t := Timer(0, action, window.ticks() + _max(0, ms))
+        self._timers.append(t)
+        return t
+    }
+
+    // The timers that are due: run (and the frame drawn); the done ones dropped.
+    define _run_timers(self) -> void {
+        if self._timers.length() == 0 { return }
+        now := window.ticks()
+        keep := []
+        for x in self._timers {
+            t: Timer = x
+            if not t.active { continue }
+            if now >= t.due {
+                t.action()
+                if t.interval > 0 and t.active {
+                    t.due = now + t.interval
+                } else {
+                    t.active = false
+                }
+            }
+            if t.active { keep.append(t) }
+        }
+        // (A timer added while they ran is in self._timers, not keep.)
+        for x in self._timers {
+            t: Timer = x
+            if t.active and not _list_has(keep, t) { keep.append(t) }
+        }
+        self._timers = keep
+    }
+
+    ---
+    One frame: the events, then layout, draw and present. Called by
+    `run`, it draws only when something changed (`force=false`); called
+    yourself (tests, your own loop), it always draws.
+    ---
+    define step(self, force: Bool = true) -> Bool {
+        events := self._pending
+        self._pending = []
+        for e in self.win.events() { events.append(e) }
+        if self._pv_dir != "" {
+            for pe in self._preview_events() {
+                ev: window.Event = pe
+                self.win._track(ev)
+                events.append(ev)
+            }
+        }
+        for ev in events {
+            e: window.Event = ev
+            if not self.win.is_open() { return false }
+            self.dispatch(e)
+            self._dirty = true
+        }
+        if not self.win.is_open() { return false }
+        self._run_timers()
+        if not self.win.is_open() { return false }
+        if self._anims.length() > 0 { self._dirty = true }
+        self._run_animations()
+        if self.on_frame != null {
+            self.on_frame()
+            self._dirty = true                      // (it may have changed anything)
+        }
+        if not self.win.is_open() { return false }
+        self._drew = false
+        if not force and not self._dirty { return true }
+        self.layout()
+        self.draw()
+        self.win.present()
+        if self._pv_dir != "" { self._preview_frame() }
+        self._a11y_sync()
+        self._a11y_check()
+        self._dirty = false
+        self._drew = true
+        return true
+    }
+
+    // In how many ms a frame is due though no event comes (-1: none): an
+    // animation now, a tooltip when its delay is over, a caret's blink.
+    define _next_wake(self) -> Int {
+        if self._anims.length() > 0 or self.on_frame != null {
+            self._wake_draws = true
+            return 0
+        }
+        wake := -1
+        tip := self._tip
+        if tip != null and tip.visible and self._tip_since >= 0 {
+            left := self.tooltip_delay - (window.ticks() - self._tip_since)
+            if left > 0 {
+                wake = left
+                self._tip_shown = false
+            } elif not self._tip_shown {
+                self._tip_shown = true
+                wake = 0
+            }
+        }
+        if self.focus != null and self.focus.visible {
+            f := self.focus.next_redraw()
+            if f >= 0 and (wake < 0 or f < wake) { wake = f }
+        }
+        if _popups.length() > 0 {
+            top: Widget = _popups[_popups.length() - 1]
+            f := top.next_redraw()
+            if f >= 0 and (wake < 0 or f < wake) { wake = f }
+        }
+        self._wake_draws = true
+        if self._timers.length() > 0 {
+            now := window.ticks()
+            for x in self._timers {
+                t: Timer = x
+                if not t.active { continue }
+                left := _max(0, t.due - now)
+                if wake < 0 or left < wake {
+                    wake = left
+                    self._wake_draws = false
+                }
+            }
+        }
+        return wake
+    }
+
+    // ----- previewed (QUIRK_UI_PREVIEW=<folder>) -----
+    //   <folder>/frame.bmp  the last frame (written to frame.tmp.bmp, then renamed)
+    //   <folder>/frame.n    a number, one more for each frame (across restarts)
+    //   <folder>/events     lines the view appends: "mouse_move x y",
+    //                       "mouse_down x y button clicks", "mouse_up x y button",
+    //                       "wheel dx dy", "key_down key ctrl shift alt meta",
+    //                       "key_up key", "text <the rest of the line>"
+
+    define _preview_start(self) -> void {
+        d := self._pv_dir
+        try {
+            ev := fs.join(d, "events")
+            if fs.is_file(ev) { self._pv_off = fs.read_text(ev).length() }      // (a restart: not the old ones)
+            n := fs.join(d, "frame.n")
+            if fs.is_file(n) { self._pv_n = Int(fs.read_text(n).trim()) }
+        } catch (Exception) {
+            self._pv_off = 0
+        }
+    }
+
+    define _preview_frame(self) -> void {
+        d := self._pv_dir
+        try {
+            tmp := fs.join(d, "frame.tmp.bmp")
+            self.win.screenshot(tmp)
+            fs.rename(tmp, fs.join(d, "frame.bmp"))
+            self._pv_n = self._pv_n + 1
+            fs.write_text(fs.join(d, "frame.n"), String(self._pv_n))
+        } catch (Exception) {
+            self._pv_n = self._pv_n          // (the view may be reading it: the next frame)
+        }
+    }
+
+    define _preview_events(self) -> List {
+        out := []
+        // The view made the folder and removes it when it stops: then this
+        // app goes too (it may outlive a watcher that was killed).
+        if not fs.is_dir(self._pv_dir) {
+            self.close()
+            return out
+        }
+        p := fs.join(self._pv_dir, "events")
+        if not fs.is_file(p) { return out }
+        text := ""
+        try { text = fs.read_text(p) } catch (e: Exception) { return out }
+        if text.length() <= self._pv_off { return out }
+        chunk := text.substring(self._pv_off, text.length())
+        end := -1
+        at := chunk.find("\n")
+        while at >= 0 {
+            end = at
+            at = chunk.find("\n", at + 1)
+        }
+        if end < 0 { return out }                       // (a line still being written)
+        self._pv_off = self._pv_off + end + 1
+        for l in chunk.substring(0, end).split("\n") {
+            e := preview_event(String(l))
+            if e != null { out.append(e) }
+        }
+        return out
+    }
+
+    --- Draw the tree, open popups and the tooltip (what `step` shows). ---
+    define draw(self) -> void {
+        t := self.theme
+        _clips.clear()
+        self.win.unclip()
+        self.win.clear(t.background)
+        self._tree().draw(self.win, t)
+        if self._dragging {
+            over := self._drop_target(self._mx, self._my)
+            if over != null { self.win.rect(over.x - 2, over.y - 2, over.width + 4, over.height + 4, t.accent, fill=false) }
+            label := "?"
+            if self._drag_data != null { label = self._drag_data.str() }
+            if label.length() > 30 { label = label.substring(0, 30) + "..." }
+            lw := t.text_w(label) + 12
+            self.win.rect(self._mx + 12, self._my + 8, lw, t.line() + 6, mix(t.surface, t.accent, 25))
+            self.win.rect(self._mx + 12, self._my + 8, lw, t.line() + 6, t.accent, fill=false)
+            self.win.text(label, self._mx + 18, self._my + 11, t.text, scale=t.scale, font=t.font)
+        }
+        for o in _popups {
+            p: Widget = o
+            p.draw_popup(self.win, t)
+        }
+        tip := self._tip
+        if tip != null {
+            if tip.visible and self._tip_since >= 0 and window.ticks() - self._tip_since >= self.tooltip_delay {
+                self._draw_tip(self._tip_text)
+            }
+        }
+    }
+
+    define _draw_tip(self, text: String) -> void {
+        t := self.theme
+        tw := t.text_w(text) + 12
+        th := text.split("\n").length() * t.line() + 8
+        tx := _clamp(self._mx + 12, 0, _max(0, self.win.width() - tw))
+        ty := self._my + 20
+        if ty + th > self.win.height() { ty = _max(0, self._my - th - 4) }
+        self.win.rect(tx, ty, tw, th, mix(t.surface, t.text, 12))
+        self.win.rect(tx, ty, tw, th, t.border, fill=false)
+        self.win.text(text, tx + 6, ty + 4, t.text, scale=t.scale, font=t.font)
+    }
+
+    --- Run until the window closes, about `fps` frames a second. ---
+    ---
+    Run until the window closes. A frame is drawn when something happened
+    — input, a resize, an animation, a caret's blink, `redraw()` — at most
+    `fps` times a second; in between, it waits for the next event instead
+    of drawing the same picture again (a window that isn't touched costs
+    almost nothing, and input isn't held up behind frames nobody needs).
+    ---
+    define run(self, fps: Int = 60) -> void {
+        budget := 1000 / fps
+        while self.is_open() {
+            start := window.ticks()
+            if not self.step(false) { break }
+            if not self.is_open() { break }
+            if self._drew {
+                left := budget - (window.ticks() - start)
+                if left > 0 { window.sleep(left) }       // (events that arrive meanwhile: one frame)
+                continue
+            }
+            wake := self._next_wake()
+            if wake == 0 {
+                if self._wake_draws { self._dirty = true }
+                continue
+            }
+            // (Previewed: the view's events come from a file — look every 30 ms.)
+            looked := self._pv_dir != "" and (wake < 0 or wake > 30)
+            if looked { wake = 30 }
+            e := self.win.wait_event(wake < 0 ? 250 : wake)
+            if e != null {
+                self._pending.append(e)
+            } elif wake > 0 and self._wake_draws and not looked {
+                self._dirty = true                       // a frame that's due (blink, tooltip)
+            }
+        }
+    }
+}

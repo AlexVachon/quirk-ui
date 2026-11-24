@@ -1,0 +1,339 @@
+// ui: FileDialog
+
+from typing.primitives.string use { String }
+from typing.collections.list use { List }
+use window
+use fs
+from .util use { mix, _max, _min, _popups }
+from .theme use { Theme }
+from .widget use { Widget }
+from .controls use { Button }
+from .text_input use { TextInput }
+from .list_view use { ListView }
+from .app use { _close_popups }
+
+---
+A window-sized dialog to pick a file (`mode="open"`), a name to save as
+(`mode="save"`) or a folder (`mode="folder"`), starting in `dir`.
+`filter` (e.g. "*.qk") limits the files shown. `show()` opens it;
+`on_pick(path)` runs with the full path chosen, `on_cancel()` (optional)
+when it's dismissed. Double-click or Enter opens a folder or picks a
+file; Backspace goes up a folder; Tab moves between the list and the
+name field; Escape cancels. While it's open it takes all input.
+---
+struct FileDialog : Widget {
+    mode: String
+    dir: String
+    filter: String
+    title: String
+    show_hidden: Bool
+    on_pick: Callable
+    on_cancel: Callable
+    is_open: Bool
+    _names: List
+    _dirs: List
+    _list: ListView
+    _name: TextInput
+    _ok: Button
+    _cancel: Button
+    _in_name: Bool
+    _px: Int
+    _py: Int
+    _pw: Int
+    _ph: Int
+    define access_role(self) -> String {
+        return "dialog"
+    }
+
+    define _a11y_name(self) -> String {
+        return self.title
+    }
+
+
+    define __init(self, mode: String = "open", dir: String = ".", on_pick: Callable = null, filter: String = "", title: String = "", on_cancel: Callable = null) -> void {
+        super().__init()
+        self.mode = mode
+        self.dir = fs.absolute(dir)
+        self.filter = filter
+        self.title = title
+        if title == "" {
+            if mode == "save" { self.title = "Save as" }
+            elif mode == "folder" { self.title = "Choose a folder" }
+            else { self.title = "Open" }
+        }
+        self.show_hidden = false
+        self.on_pick = on_pick
+        self.on_cancel = on_cancel
+        self.is_open = false
+        self._names = []
+        self._dirs = []
+        self._list = ListView([], rows=8)
+        self._name = TextInput("", columns=30)
+        label := "Open"
+        if mode == "save" { label = "Save" }
+        if mode == "folder" { label = "Choose" }
+        self._ok = Button(label)
+        self._cancel = Button("Cancel")
+        self._in_name = mode == "save"
+        self._px = 0
+        self._py = 0
+        self._pw = 0
+        self._ph = 0
+    }
+
+    --- Open the dialog (reading `dir`). ---
+    define show(self) -> void {
+        _close_popups()
+        self.go(self.dir)
+        self.is_open = true
+        _popups.append(self)
+    }
+
+    --- Show folder `path`. ---
+    define go(self, path: String) -> void {
+        if not fs.is_dir(path) { return }
+        self.dir = fs.absolute(path)
+        dirs := []
+        files := []
+        for e in fs.list_dir(self.dir) {
+            name: String = e
+            if not self.show_hidden and name.startswith(".") { continue }
+            if fs.is_dir(fs.join(self.dir, name)) {
+                dirs.append(name)
+            } elif self.mode != "folder" and (self.filter == "" or fs.matches(self.filter, name)) {
+                files.append(name)
+            }
+        }
+        dirs = _sorted_names(dirs)
+        files = _sorted_names(files)
+        names := []
+        kinds := []
+        if fs.dirname(self.dir) != self.dir {
+            names.append("..")
+            kinds.append(true)
+        }
+        for d in dirs {
+            names.append(d)
+            kinds.append(true)
+        }
+        for f in files {
+            names.append(f)
+            kinds.append(false)
+        }
+        self._names = names
+        self._dirs = kinds
+        shown := []
+        i := 0
+        while i < names.length() {
+            n: String = names[i]
+            isd: Bool = kinds[i]
+            if isd and n != ".." { shown.append(n + "/") } else { shown.append(n) }
+            i = i + 1
+        }
+        self._list.items = shown
+        self._list.selected = -1
+        self._list._top = 0
+        if shown.length() > 0 { self._list.select(0) }
+    }
+
+    --- Dismiss the dialog without a choice. ---
+    define cancel(self) -> void {
+        self.close_popup()
+        if self.on_cancel != null { self.on_cancel() }
+    }
+
+    define close_popup(self) -> void {
+        if not self.is_open { return }
+        self.is_open = false
+        keep := []
+        for o in _popups {
+            w: Widget = o
+            if w != self { keep.append(w) }
+        }
+        _popups.clear()
+        for w in keep { _popups.append(w) }
+    }
+
+    define _pick(self, path: String) -> void {
+        self.close_popup()
+        if self.on_pick != null { self.on_pick(path) }
+    }
+
+    // Enter / double-click on list row i.
+    define _open_row(self, i: Int) -> void {
+        if i < 0 or i >= self._names.length() { return }
+        name: String = self._names[i]
+        isd: Bool = self._dirs[i]
+        if name == ".." {
+            self.go(fs.dirname(self.dir))
+        } elif isd {
+            self.go(fs.join(self.dir, name))
+        } elif self.mode == "save" {
+            self._name.text = name
+            self._name.select_all()
+            self._confirm()
+        } else {
+            self._pick(fs.join(self.dir, name))
+        }
+    }
+
+    // The Open / Save / Choose button.
+    define _confirm(self) -> void {
+        if self.mode == "save" {
+            name := self._name.text.trim()
+            if name.length() > 0 { self._pick(fs.join(self.dir, name)) }
+        } elif self.mode == "folder" {
+            i := self._list.selected
+            if i >= 0 and i < self._names.length() {
+                n: String = self._names[i]
+                if n != ".." {
+                    self._pick(fs.join(self.dir, n))
+                    return
+                }
+            }
+            self._pick(self.dir)
+        } else {
+            self._open_row(self._list.selected)
+        }
+    }
+
+    define popup_contains(self, px: Int, py: Int) -> Bool {
+        return true                               // modal: every click is ours
+    }
+
+    define popup_handle(self, e: window.Event) -> Bool {
+        if self._list.contains(e.x, e.y) or (e.kind == "wheel") {
+            if e.kind == "mouse_down" {
+                self._in_name = false
+                self._list.focused = true
+                self._name.focused = false
+            }
+            self._list.handle(e)
+            if e.kind == "mouse_down" and e.button == 1 and e.clicks >= 2 { self._open_row(self._list.selected) }
+            elif e.kind == "mouse_down" and self.mode == "save" {
+                i := self._list.selected
+                if i >= 0 {
+                    isd: Bool = self._dirs[i]
+                    if not isd { self._name.text = self._names[i] }
+                }
+            }
+            return true
+        }
+        if self.mode == "save" and (self._name.contains(e.x, e.y) or self._name._dragging) {
+            if e.kind == "mouse_down" {
+                self._in_name = true
+                self._name.focused = true
+                self._list.focused = false
+            }
+            self._name.handle(e)
+            return true
+        }
+        for b in [self._ok, self._cancel] {
+            btn: Button = b
+            if e.kind == "mouse_down" and e.button == 1 { btn.pressed = btn.contains(e.x, e.y) }
+            if e.kind == "mouse_up" and e.button == 1 {
+                was := btn.pressed
+                btn.pressed = false
+                if was and btn.contains(e.x, e.y) {
+                    if btn == self._ok { self._confirm() } else { self.cancel() }
+                    return true
+                }
+            }
+        }
+        return true
+    }
+
+    define popup_key(self, e: window.Event) -> Bool {
+        if e.kind == "key_down" {
+            k := e.key
+            if k == "escape" {
+                self.cancel()
+                return true
+            }
+            if k == "tab" and self.mode == "save" {
+                self._in_name = not self._in_name
+                return true
+            }
+            if k == "return" or k == "keypad_enter" {
+                if self._in_name { self._confirm() } else { self._open_row(self._list.selected) }
+                return true
+            }
+            if k == "backspace" and not self._in_name {
+                self.go(fs.dirname(self.dir))
+                return true
+            }
+        }
+        if self._in_name { self._name.handle(e) } else { self._list.handle(e) }
+        return true
+    }
+
+    define draw_popup(self, win: window.Window, t: Theme) -> void {
+        // Dim what's behind, then a centred panel.
+        win.rect(0, 0, win.width(), win.height(), window.rgba(0, 0, 0, 110))
+        self._pw = _min(win.width() - 24, 520)
+        self._ph = _min(win.height() - 24, 380)
+        self._px = (win.width() - self._pw) / 2
+        self._py = (win.height() - self._ph) / 2
+        x := self._px
+        y := self._py
+        w := self._pw
+        h := self._ph
+        win.rect(x + 4, y + 4, w, h, mix(t.background, window.black(), 50))
+        win.rect(x, y, w, h, t.surface)
+        win.rect(x, y, w, h, t.border, fill=false)
+        lh := t.line()
+        win.text(self.title, x + 12, y + 10, t.text, scale=t.scale, font=t.font)
+        shown_dir := self.dir
+        // Too long: keep the end ("...quirk/packages").
+        if t.text_w(shown_dir) > w - 24 {
+            cut := 0
+            while cut < shown_dir.length() and t.text_w("..." + shown_dir.substring(cut, shown_dir.length())) > w - 24 { cut = cut + 1 }
+            shown_dir = "..." + shown_dir.substring(cut, shown_dir.length())
+        }
+        win.text(shown_dir, x + 12, y + 10 + lh + 4, t.muted, scale=t.scale, font=t.font)
+        top := y + 10 + 2 * lh + 14
+        bottom := y + h - 12 - (lh + 12)          // the buttons row
+        if self.mode == "save" { bottom = bottom - (lh + 12) - 8 }
+        self._list.focused = not self._in_name
+        self._name.focused = self._in_name
+        self._list.measure(t)
+        self._list.place(x + 12, top, w - 24, _max(30, bottom - top - 8))
+        self._list.draw(win, t)
+        if self.mode == "save" {
+            self._name.measure(t)
+            self._name.place(x + 12, bottom, w - 24, lh + 12)
+            self._name.draw(win, t)
+        }
+        by := y + h - 12 - (lh + 12)
+        for b in [self._cancel, self._ok] {
+            btn: Button = b
+            btn.measure(t)
+        }
+        okw := self._ok.min_w
+        cw := self._cancel.min_w
+        self._ok.place(x + w - 12 - okw, by, okw, lh + 12)
+        self._cancel.place(x + w - 12 - okw - 8 - cw, by, cw, lh + 12)
+        self._cancel.draw(win, t)
+        self._ok.draw(win, t)
+    }
+}
+
+// Names sorted, ignoring case (insertion sort; folders are small).
+define _sorted_names(names: List) -> List {
+    out := []
+    for n in names { out.append(n) }
+    i := 1
+    while i < out.length() {
+        cur: String = out[i]
+        j := i - 1
+        while j >= 0 {
+            prev: String = out[j]
+            if prev.lower() <= cur.lower() { break }
+            out[j + 1] = prev
+            j = j - 1
+        }
+        out[j + 1] = cur
+        i = i + 1
+    }
+    return out
+}

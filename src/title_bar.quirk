@@ -1,0 +1,171 @@
+// ui: TitleBar
+
+from typing.primitives.string use { String }
+from typing.collections.list use { List }
+use window
+from .util use { mix, _bar_bottom, _clamp, _max }
+from .theme use { Theme }
+from .widget use { Widget, _clip_pop, _clip_push }
+
+---
+The title bar of an `App(title_bar=true)`: the window's title, an optional
+widget on its left (`content`: a `MenuBar`, say), and minimize / maximize
+(restore) / close buttons on its right. Drawn by the program in its theme
+instead of the system's; dragging it moves the window (with the system's
+snapping), a double-click maximizes, and the window's edges still resize
+it. `app.title_bar` is it.
+---
+struct TitleBar : Widget {
+    win: window.Window
+    content: Widget          // shown on the left (null: none)
+    on_close: Callable       // the close button (default: close the window)
+    active: Bool             // the window has the keyboard focus (dimmed when not)
+    button_w: Int
+    _press: Int              // the button pressed (-1: none)
+
+    define __init(self, win: window.Window, content: Widget = null, on_close: Callable = null) -> void {
+        super().__init()
+        self.win = win
+        self.content = content
+        self.on_close = on_close
+        self.active = true
+        self.button_w = 46
+        self._press = -1
+        self.takes_clicks = true
+    }
+
+    define children(self) -> List {
+        if self.content == null { return [] }
+        return [self.content]
+    }
+
+    define access_role(self) -> String {
+        return "group"
+    }
+
+    define _a11y_name(self) -> String {
+        return self.win.title
+    }
+
+    define measure(self, t: Theme) -> void {
+        self.min_h = _max(32, t.line() + 14)
+        self.min_w = 3 * self.button_w + 40
+        if self.content != null {
+            self.content.measure(t)
+            self.min_w = self.min_w + self.content.min_w
+            self.min_h = _max(self.min_h, self.content.min_h)
+        }
+    }
+
+    define place(self, x: Int, y: Int, width: Int, height: Int) -> void {
+        self.x = x
+        self.y = y
+        self.width = width
+        self.height = height
+        _bar_bottom[0] = y + height
+        if self.content != null {
+            self.content.place(x + 8, y + (height - self.content.min_h) / 2, self.content.min_w, self.content.min_h)
+        }
+    }
+
+    --- Where the buttons are: [x, y, width, height]. ---
+    define buttons_box(self) -> List {
+        return [self.x + self.width - 3 * self.button_w, self.y, 3 * self.button_w, self.height]
+    }
+
+    --- The button at (px, py): 0 minimize, 1 maximize / restore, 2 close, -1 none. ---
+    define button_at(self, px: Int, py: Int) -> Int {
+        left := self.x + self.width - 3 * self.button_w
+        if py < self.y or py >= self.y + self.height or px < left or px >= self.x + self.width { return -1 }
+        return _clamp((px - left) / self.button_w, 0, 2)
+    }
+
+    --- What a press here doesn't drag: the buttons and `content`. ---
+    define holes(self) -> List {
+        out := [self.buttons_box()]
+        if self.content != null and self.content.visible {
+            out.append([self.content.x, self.content.y, self.content.width, self.content.height])
+        }
+        return out
+    }
+
+    --- Press button `i` from code (0 minimize, 1 maximize / restore, 2 close). ---
+    define press(self, i: Int) -> void {
+        if i == 0 { self.win.minimize() }
+        if i == 1 {
+            if self.win.maximized() { self.win.restore() } else { self.win.maximize() }
+        }
+        if i == 2 {
+            if self.on_close != null { self.on_close() } else { self.win.close() }
+        }
+    }
+
+    define draw(self, win: window.Window, t: Theme) -> void {
+        bg := mix(t.background, t.surface, 60)
+        ink := self.active ? t.text : t.muted
+        win.rect(self.x, self.y, self.width, self.height, bg)
+        win.rect(self.x, self.y + self.height - 1, self.width, 1, t.border)
+        if self.content != null { self.content.draw(win, t) }
+        // The title, centred in the window; past the content if they'd meet.
+        title := self.win.title
+        tw := t.text_w(title)
+        left := self.content != null ? self.content.x + self.content.width + 16 : self.x + 12
+        right := self.x + self.width - 3 * self.button_w - 12
+        tx := self.x + (self.width - tw) / 2
+        if tx < left { tx = left }
+        if tx + tw > right { tx = _max(left, right - tw) }
+        _clip_push(win, left, self.y, _max(0, right - left), self.height)
+        win.text(title, tx, self.y + (self.height - t.line()) / 2, ink, scale=t.scale, font=t.font)
+        _clip_pop(win)
+        // The buttons: hovered one lit (close: red), pressed one darker.
+        hover := -1
+        if self.hovered or self._press >= 0 {
+            m := win.mouse()
+            hover = self.button_at(m.0, m.1)
+        }
+        i := 0
+        while i < 3 {
+            bx := self.x + self.width - (3 - i) * self.button_w
+            glyph := ink
+            if hover == i {
+                lit := i == 2 ? window.hex("#c42b1c") : mix(bg, t.text, 12)
+                if self._press == i { lit = i == 2 ? window.hex("#b22a1b") : mix(bg, t.text, 20) }
+                win.rect(bx, self.y, self.button_w, self.height - 1, lit)
+                if i == 2 { glyph = window.white() }
+            }
+            cx := bx + self.button_w / 2
+            cy := self.y + self.height / 2
+            if i == 0 { win.rect(cx - 5, cy, 10, 1, glyph) }
+            if i == 1 {
+                if self.win.maximized() {
+                    win.rect(cx - 5, cy - 3, 8, 8, glyph, fill=false)          // restore: two windows
+                    win.rect(cx - 3, cy - 5, 8, 1, glyph)
+                    win.rect(cx + 4, cy - 5, 1, 8, glyph)
+                } else {
+                    win.rect(cx - 5, cy - 5, 10, 10, glyph, fill=false)
+                }
+            }
+            if i == 2 {
+                win.line(cx - 5, cy - 5, cx + 5, cy + 5, glyph)
+                win.line(cx - 5, cy + 5, cx + 5, cy - 5, glyph)
+            }
+            i = i + 1
+        }
+    }
+
+    define handle(self, e: window.Event) -> Bool {
+        if e.kind == "mouse_down" and e.button == 1 {
+            self._press = self.button_at(e.x, e.y)
+            // A double-click on the bar itself (where the system didn't take it).
+            if self._press < 0 and e.clicks == 2 { self.press(1) }
+            return true
+        }
+        if e.kind == "mouse_up" and e.button == 1 {
+            was := self._press
+            self._press = -1
+            if was >= 0 and self.button_at(e.x, e.y) == was { self.press(was) }
+            return true
+        }
+        return false
+    }
+}

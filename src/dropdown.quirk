@@ -1,0 +1,283 @@
+// ui: Dropdown
+
+from typing.primitives.string use { String }
+from typing.collections.list use { List }
+use window
+from .util use { mix, _clamp, _max, _min, _popups }
+from .theme use { Theme }
+from .widget use { Widget, _ink }
+from .access use { AccessNode }
+
+---
+Pick one of `options` (anything with `.str()`) from a list that opens
+below the field. Click it, or Space / Enter / Alt+Down when focused;
+Up / Down change the choice directly while it's closed. `selected` is
+the index; `on_change(index, item)` runs when it changes.
+---
+struct Dropdown : Widget {
+    options: List
+    selected: Int
+    on_change: Callable
+    is_open: Bool
+    max_rows: Int
+    _hover: Int
+    _top: Int
+    _px: Int
+    _py: Int
+    _pw: Int
+    _ph: Int
+    define access_action(self, action: String, value: String, node: AccessNode) -> Bool {
+        if not self.enabled { return false }
+        if action == "select" and node.index >= 0 {
+            self.select(node.index)
+            self.close()
+        } elif action == "expand" {
+            self.open()
+        } elif action == "collapse" {
+            self.close()
+        } elif action == "set_value" {
+            i := 0
+            while i < self.options.length() {
+                if String(self.options[i]) == value {
+                    self.select(i)
+                    return true
+                }
+                i = i + 1
+            }
+            return false
+        } else {
+            return false
+        }
+        return true
+    }
+
+    define access_role(self) -> String {
+        return "combobox"
+    }
+
+    define access_value(self) -> String {
+        if self.selected < 0 or self.selected >= self.options.length() { return "" }
+        return String(self.options[self.selected])
+    }
+
+    define _a11y_states(self, out: List) -> void {
+        out.append(self.is_open ? "expanded" : "collapsed")
+    }
+
+    define _a11y_children(self) -> List {
+        out := []
+        if not self.is_open { return out }
+        i := 0
+        while i < self.options.length() {
+            item := AccessNode("option", String(self.options[i]))._item(self, i)
+            if i == self.selected { item.states.append("selected") }
+            out.append(item)
+            i = i + 1
+        }
+        return out
+    }
+
+
+    define __init(self, options: List, selected: Int = 0, on_change: Callable = null, expand: Bool = false) -> void {
+        super().__init()
+        self.options = options
+        self.selected = _clamp(selected, 0, _max(0, options.length() - 1))
+        self.on_change = on_change
+        self.expand = expand
+        self.is_open = false
+        self.max_rows = 8
+        self._hover = -1
+        self._top = 0
+        self._px = 0
+        self._py = 0
+        self._pw = 0
+        self._ph = 0
+        self.focusable = true
+    }
+
+    --- The chosen option as text ("" when there are none). ---
+    define text(self) -> String {
+        if self.selected < 0 or self.selected >= self.options.length() { return "" }
+        return self.options[self.selected].str()
+    }
+
+    --- Choose option `i` (clamped); runs `on_change` if it changed. ---
+    define select(self, i: Int) -> void {
+        if self.options.length() == 0 { return }
+        ni := _clamp(i, 0, self.options.length() - 1)
+        if ni != self.selected {
+            self.selected = ni
+            if self.on_change != null { self.on_change(ni, self.options[ni]) }
+        }
+    }
+
+    --- Show the list. ---
+    define open(self) -> void {
+        if self.is_open or not self.enabled or self.options.length() == 0 { return }
+        self.is_open = true
+        self._hover = self.selected
+        _popups.append(self)
+    }
+
+    --- Hide the list. ---
+    define close(self) -> void {
+        if not self.is_open { return }
+        self.is_open = false
+        keep := []
+        for o in _popups {
+            w: Widget = o
+            if w != self { keep.append(w) }
+        }
+        _popups.clear()
+        for w in keep { _popups.append(w) }
+    }
+
+    define close_popup(self) -> void {
+        self.close()
+    }
+
+    define _rows(self) -> Int {
+        return _max(1, _min(self.max_rows, self.options.length()))
+    }
+
+    define _row_h(self) -> Int {
+        return 24
+    }
+
+    define measure(self, t: Theme) -> void {
+        widest := 4 * t.char_w()
+        for o in self.options { widest = _max(widest, t.text_w(o.str())) }
+        self.min_w = widest + 16 + 3 * t.char_w()
+        self.min_h = t.line() + 12
+    }
+
+    define handle(self, e: window.Event) -> Bool {
+        if not self.enabled { return false }
+        if e.kind == "mouse_down" and e.button == 1 {
+            if self.is_open { self.close() } else { self.open() }
+            return true
+        }
+        if e.kind == "mouse_up" { return true }
+        if e.kind != "key_down" { return false }
+        k := e.key
+        if self.is_open {
+            if k == "down" {
+                self._hover = _min(self.options.length() - 1, self._hover + 1)
+            } elif k == "up" {
+                self._hover = _max(0, self._hover - 1)
+            } elif k == "home" {
+                self._hover = 0
+            } elif k == "end" {
+                self._hover = self.options.length() - 1
+            } elif k == "return" or k == "keypad_enter" or k == "space" {
+                if self._hover >= 0 { self.select(self._hover) }
+                self.close()
+            } elif k == "escape" {
+                self.close()
+            } else {
+                return false
+            }
+            if self._hover < self._top { self._top = self._hover }
+            if self._hover >= self._top + self._rows() { self._top = self._hover - self._rows() + 1 }
+            return true
+        }
+        if k == "space" or k == "return" or k == "keypad_enter" or (k == "down" and e.alt) {
+            self.open()
+        } elif k == "down" {
+            self.select(self.selected + 1)
+        } elif k == "up" {
+            self.select(self.selected - 1)
+        } else {
+            return false
+        }
+        return true
+    }
+
+    define draw(self, win: window.Window, t: Theme) -> void {
+        win.rect(self.x, self.y, self.width, self.height, t.input)
+        border := t.border
+        if self.focused or self.is_open {
+            border = t.accent
+        } elif self.hovered {
+            border = mix(t.border, t.text, 30)
+        }
+        win.rect(self.x, self.y, self.width, self.height, border, fill=false)
+        cw := t.char_w()
+        label := self.text()
+        label = t.fit(label, self.width - 16 - 3 * cw)
+        win.text(label, self.x + 8, self.y + (self.height - t.line()) / 2, _ink(self, t.text, t), scale=t.scale, font=t.font)
+        // The arrow: a small filled triangle pointing down.
+        ax := self.x + self.width - 8 - cw
+        ay := self.y + self.height / 2 - 2
+        half := _max(3, cw / 2)
+        r := 0
+        while r <= half {
+            win.line(ax - half + r, ay + r, ax + half - r, ay + r, _ink(self, t.muted, t))
+            r = r + 1
+        }
+    }
+
+    define popup_contains(self, px: Int, py: Int) -> Bool {
+        return px >= self._px and py >= self._py and px < self._px + self._pw and py < self._py + self._ph
+    }
+
+    define popup_handle(self, e: window.Event) -> Bool {
+        rh := self._row_h()
+        if e.kind == "mouse_move" {
+            row := (e.y - self._py - 2) / rh
+            self._hover = _clamp(self._top + row, 0, self.options.length() - 1)
+            return true
+        }
+        if e.kind == "mouse_down" and e.button == 1 {
+            row := (e.y - self._py - 2) / rh
+            i := self._top + row
+            if i >= 0 and i < self.options.length() { self.select(i) }
+            self.close()
+            return true
+        }
+        if e.kind == "wheel" {
+            most := _max(0, self.options.length() - self._rows())
+            self._top = _clamp(self._top - e.dy, 0, most)
+            return true
+        }
+        return e.kind == "mouse_up"
+    }
+
+    define draw_popup(self, win: window.Window, t: Theme) -> void {
+        rh := self._row_h()
+        rows := self._rows()
+        self._pw = self.width
+        self._ph = rows * rh + 4
+        self._px = self.x
+        self._py = self.y + self.height + 2
+        // No room below: open upwards.
+        if self._py + self._ph > win.height() and self.y - self._ph - 2 >= 0 { self._py = self.y - self._ph - 2 }
+        self._top = _clamp(self._top, 0, _max(0, self.options.length() - rows))
+        win.rect(self._px + 3, self._py + 3, self._pw, self._ph, mix(t.background, window.black(), 45))   // shadow
+        win.rect(self._px, self._py, self._pw, self._ph, t.surface)
+        win.rect(self._px, self._py, self._pw, self._ph, t.border, fill=false)
+        fit := self._pw - 16
+        i := self._top
+        while i < self.options.length() and i < self._top + rows {
+            ry := self._py + 2 + (i - self._top) * rh
+            ink := t.text
+            if i == self._hover {
+                win.rect(self._px + 2, ry, self._pw - 4, rh, t.accent)
+                ink = t.accent_text
+            } elif i == self.selected {
+                win.rect(self._px + 2, ry, self._pw - 4, rh, mix(t.accent, t.surface, 75))
+            }
+            label := self.options[i].str()
+            label = t.fit(label, fit)
+            win.text(label, self._px + 8, ry + (rh - t.line()) / 2, ink, scale=t.scale, font=t.font)
+            i = i + 1
+        }
+        if self.options.length() > rows {
+            track := self._ph - 4
+            bar := _max(8, track * rows / self.options.length())
+            most := _max(1, self.options.length() - rows)
+            by := self._py + 2 + (track - bar) * self._top / most
+            win.rect(self._px + self._pw - 5, by, 3, bar, t.muted)
+        }
+    }
+}

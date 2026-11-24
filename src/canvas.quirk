@@ -1,0 +1,54 @@
+// ui: Canvas
+
+from typing.primitives.string use { String }
+from typing.collections.list use { List }
+use window
+from .theme use { Theme }
+from .widget use { Widget, _clip_pop, _clip_push }
+
+---
+A widget you draw yourself: `on_draw(win, x, y, width, height)` runs every
+frame (drawing is clipped to the canvas), `on_event(e)` gets its mouse
+events (coordinates are the window's) and keys while it has the focus.
+`width` / `height` are the size it asks for; with `expand` it takes free
+space.
+---
+struct Canvas : Widget {
+    on_draw: Callable
+    on_event: Callable
+    want_w: Int
+    want_h: Int
+    define access_role(self) -> String {
+        return "graphic"
+    }
+
+
+    define __init(self, on_draw: Callable = null, on_event: Callable = null, width: Int = 200, height: Int = 150, expand: Bool = false, focusable: Bool = false) -> void {
+        super().__init()
+        self.on_draw = on_draw
+        self.on_event = on_event
+        self.want_w = width
+        self.want_h = height
+        self.expand = expand
+        self.focusable = focusable
+        self.takes_clicks = true
+    }
+
+    define measure(self, t: Theme) -> void {
+        self.min_w = self.want_w
+        self.min_h = self.want_h
+    }
+
+    define handle(self, e: window.Event) -> Bool {
+        if not self.enabled or self.on_event == null { return false }
+        self.on_event(e)
+        return true
+    }
+
+    define draw(self, win: window.Window, t: Theme) -> void {
+        if self.on_draw == null { return }
+        _clip_push(win, self.x, self.y, self.width, self.height)
+        self.on_draw(win, self.x, self.y, self.width, self.height)
+        _clip_pop(win)
+    }
+}

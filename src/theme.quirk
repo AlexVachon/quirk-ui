@@ -1,0 +1,127 @@
+// ui: Theme, dark(), light()
+
+from typing.primitives.string use { String }
+from typing.collections.list use { List }
+use window
+from .util use { _max }
+
+---
+Colours and sizes every widget draws with. Make your own by changing a
+copy of `ui.dark()` / `ui.light()`.
+  `background` — the window; `surface` — panels; `text`, `muted` — text
+  `accent` / `accent_text` — buttons, checks, sliders, selection
+  `input` — text field / list background; `border`; `focus` — focus ring
+  `scale` — text size multiplier (1 = 8x16 pixel characters)
+  `font`  — a `window.Font` for all text (null: the built-in 8x16 font);
+            `theme.font = window.load_font("DejaVuSans.ttf", 15)`
+---
+struct Theme {
+    background: Int
+    surface: Int
+    text: Int
+    muted: Int
+    accent: Int
+    accent_text: Int
+    input: Int
+    border: Int
+    focus: Int
+    scale: Int
+    font: window.Font
+    weights: Map             // weight ("medium", "semibold", "bold") → its Font (see set_weight)
+
+    define __init(self, background: Int, surface: Int, text: Int, muted: Int, accent: Int, accent_text: Int, input: Int, border: Int, focus: Int, scale: Int = 1) -> void {
+        self.background = background
+        self.surface = surface
+        self.text = text
+        self.muted = muted
+        self.accent = accent
+        self.accent_text = accent_text
+        self.input = input
+        self.border = border
+        self.focus = focus
+        self.scale = scale
+        self.font = null
+        self.weights = {}
+    }
+
+    ---
+    The font for text of `weight` ("medium", "semibold", "bold", or 500 /
+    600 / 700): `theme.set_weight("bold", window.load_font("Inter-Bold.ttf", 13))`.
+    Without one, "semibold" and "bold" are drawn twice, a pixel apart.
+    ---
+    define set_weight(self, weight: String, font: window.Font) -> void {
+        self.weights[_weight_name(weight)] = font
+    }
+
+    --- The font for `weight` ("" or "regular": `font`). ---
+    define font_for(self, weight: String = "") -> window.Font {
+        w := _weight_name(weight)
+        if w != "regular" and self.weights.has(w) { return self.weights[w] }
+        return self.font
+    }
+
+    // A weight drawn twice (no font of its own).
+    define _doubled(self, weight: String) -> Bool {
+        w := _weight_name(weight)
+        return (w == "semibold" or w == "bold") and not self.weights.has(w)
+    }
+
+    --- Height of one line of text. ---
+    define line(self) -> Int {
+        if self.font != null { return self.font.line_height }
+        return 16 * self.scale
+    }
+
+    --- Width of one (average) character — for sizes given in characters. ---
+    define char_w(self) -> Int {
+        if self.font != null { return _max(1, self.font.width("n")) }
+        return 8 * self.scale
+    }
+
+    --- Width in pixels of `s` (its longest line) in the theme's font (of `weight`). ---
+    define text_w(self, s: String, weight: String = "") -> Int {
+        extra := self._doubled(weight) ? 1 : 0
+        f := self.font_for(weight)
+        if f != null { return f.width(s) + extra }
+        return window.text_width(s, self.scale) + extra
+    }
+
+    --- Draw `s` at (x, y) in the theme's font (of `weight`). ---
+    define draw_text(self, win: window.Window, s: String, x: Int, y: Int, color: Int, weight: String = "") -> void {
+        f := self.font_for(weight)
+        win.text(s, x, y, color, scale=self.scale, font=f)
+        if self._doubled(weight) { win.text(s, x + 1, y, color, scale=self.scale, font=f) }
+    }
+
+    --- `s` cut to fit `px` pixels. ---
+    define fit(self, s: String, px: Int) -> String {
+        if self.text_w(s) <= px { return s }
+        if self.font == null { return s.substring(0, _max(0, px / self.char_w())) }
+        n := s.length()
+        while n > 0 and self.text_w(s.substring(0, n)) > px { n = n - 1 }
+        return s.substring(0, n)
+    }
+}
+
+// "bold", "700", "Bold" → "bold"; unknown → "regular".
+define _weight_name(weight: String) -> String {
+    w := weight.trim().lower()
+    if w == "500" or w == "medium" { return "medium" }
+    if w == "600" or w == "semibold" or w == "semi-bold" { return "semibold" }
+    if w == "700" or w == "800" or w == "900" or w == "bold" { return "bold" }
+    return "regular"
+}
+
+--- Light text on dark grey, blue accent. ---
+define dark() -> Theme {
+    return Theme(window.hex("#1e1f24"), window.hex("#2a2c33"), window.hex("#e8e8ec"), window.hex("#8b8d98"),
+                 window.hex("#4c8dff"), window.hex("#ffffff"), window.hex("#15161a"), window.hex("#3d404a"),
+                 window.hex("#7fb0ff"))
+}
+
+--- Dark text on white, blue accent. ---
+define light() -> Theme {
+    return Theme(window.hex("#f4f5f7"), window.hex("#ffffff"), window.hex("#1d1f24"), window.hex("#6b6f7a"),
+                 window.hex("#2f6fde"), window.hex("#ffffff"), window.hex("#ffffff"), window.hex("#c9ccd3"),
+                 window.hex("#2f6fde"))
+}

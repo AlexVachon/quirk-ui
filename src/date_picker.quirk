@@ -1,0 +1,311 @@
+// ui: DatePicker
+
+from typing.primitives.string use { String }
+from typing.collections.list use { List }
+use window
+from .util use { mix, _clamp, _max, _popups }
+from .theme use { Theme }
+from .widget use { Widget, _ink }
+from .access use { AccessNode }
+
+define _leap(y: Int) -> Bool {
+    return (y % 4 == 0 and y % 100 != 0) or y % 400 == 0
+}
+
+--- Days in `month` (1-12) of `year`. ---
+define days_in_month(year: Int, month: Int) -> Int {
+    if month == 2 {
+        if _leap(year) { return 29 }
+        return 28
+    }
+    if month == 4 or month == 6 or month == 9 or month == 11 { return 30 }
+    return 31
+}
+
+--- Day of the week of a date: 0 = Monday ... 6 = Sunday. ---
+define weekday(year: Int, month: Int, day: Int) -> Int {
+    // Sakamoto's method (0 = Sunday), shifted so the week starts on Monday.
+    offsets := [0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4]
+    y := year
+    if month < 3 { y = y - 1 }
+    o: Int = offsets[month - 1]
+    sun0 := (y + y / 4 - y / 100 + y / 400 + o + day) % 7
+    return (sun0 + 6) % 7
+}
+
+define _two(n: Int) -> String {
+    if n < 10 { return "0" + n.str() }
+    return n.str()
+}
+
+_MONTHS := ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"]
+
+---
+A date field that opens a month calendar. `year`, `month` (1-12), `day`;
+`text()` is "YYYY-MM-DD". Click the field (or Space / Enter / Alt+Down) to
+open it; in the calendar click a day, `<` / `>` change month, arrows move
+by day / week, Page Up / Page Down by month, Enter picks, Escape closes.
+`on_change(year, month, day)` runs when the date changes.
+---
+struct DatePicker : Widget {
+    year: Int
+    month: Int
+    day: Int
+    on_change: Callable
+    is_open: Bool
+    _vy: Int
+    _vm: Int
+    _cursor: Int
+    _px: Int
+    _py: Int
+    _pw: Int
+    _ph: Int
+    _cell: Int
+    define access_action(self, action: String, value: String, node: AccessNode) -> Bool {
+        if not self.enabled { return false }
+        if action == "expand" { self.open() } elif action == "collapse" { self.close() } else { return false }
+        return true
+    }
+
+    define access_role(self) -> String {
+        return "combobox"
+    }
+
+    define access_value(self) -> String {
+        m := self.month < 10 ? "0" + String(self.month) : String(self.month)
+        d := self.day < 10 ? "0" + String(self.day) : String(self.day)
+        return String(self.year) + "-" + m + "-" + d
+    }
+
+    define _a11y_states(self, out: List) -> void {
+        out.append(self.is_open ? "expanded" : "collapsed")
+    }
+
+
+    define __init(self, year: Int = 2026, month: Int = 1, day: Int = 1, on_change: Callable = null) -> void {
+        super().__init()
+        self.year = year
+        self.month = _clamp(month, 1, 12)
+        self.day = _clamp(day, 1, days_in_month(year, self.month))
+        self.on_change = on_change
+        self.is_open = false
+        self._vy = self.year
+        self._vm = self.month
+        self._cursor = self.day
+        self._px = 0
+        self._py = 0
+        self._pw = 0
+        self._ph = 0
+        self._cell = 28
+        self.focusable = true
+    }
+
+    --- The date as "YYYY-MM-DD". ---
+    define text(self) -> String {
+        return self.year.str() + "-" + _two(self.month) + "-" + _two(self.day)
+    }
+
+    --- Set the date (clamped to a real date); runs `on_change` if it changed. ---
+    define set_date(self, year: Int, month: Int, day: Int) -> void {
+        m := _clamp(month, 1, 12)
+        d := _clamp(day, 1, days_in_month(year, m))
+        if year == self.year and m == self.month and d == self.day { return }
+        self.year = year
+        self.month = m
+        self.day = d
+        if self.on_change != null { self.on_change(year, m, d) }
+    }
+
+    --- Show the calendar (on the chosen date's month). ---
+    define open(self) -> void {
+        if self.is_open or not self.enabled { return }
+        self._vy = self.year
+        self._vm = self.month
+        self._cursor = self.day
+        self.is_open = true
+        _popups.append(self)
+    }
+
+    --- Hide the calendar. ---
+    define close(self) -> void {
+        if not self.is_open { return }
+        self.is_open = false
+        keep := []
+        for o in _popups {
+            w: Widget = o
+            if w != self { keep.append(w) }
+        }
+        _popups.clear()
+        for w in keep { _popups.append(w) }
+    }
+
+    define close_popup(self) -> void {
+        self.close()
+    }
+
+    // Move the shown month by `by` months (cursor clamped to it).
+    define _shift_month(self, by: Int) -> void {
+        idx := self._vy * 12 + (self._vm - 1) + by
+        self._vy = idx / 12
+        self._vm = idx % 12 + 1
+        self._cursor = _clamp(self._cursor, 1, days_in_month(self._vy, self._vm))
+    }
+
+    // Move the cursor by `by` days, across months.
+    define _shift_day(self, by: Int) -> void {
+        d := self._cursor + by
+        while d < 1 {
+            self._shift_month(-1)
+            d = d + days_in_month(self._vy, self._vm)
+        }
+        while d > days_in_month(self._vy, self._vm) {
+            d = d - days_in_month(self._vy, self._vm)
+            self._shift_month(1)
+        }
+        self._cursor = d
+    }
+
+    define measure(self, t: Theme) -> void {
+        self.min_w = t.text_w("0000-00-00") + 16 + 3 * t.char_w()
+        self.min_h = t.line() + 12
+    }
+
+    define handle(self, e: window.Event) -> Bool {
+        if not self.enabled { return false }
+        if e.kind == "mouse_down" and e.button == 1 {
+            if self.is_open { self.close() } else { self.open() }
+            return true
+        }
+        if e.kind == "mouse_up" { return true }
+        if e.kind == "key_down" and not self.is_open {
+            if e.key == "space" or e.key == "return" or (e.key == "down" and e.alt) {
+                self.open()
+                return true
+            }
+        }
+        return false
+    }
+
+    define popup_contains(self, px: Int, py: Int) -> Bool {
+        return px >= self._px and py >= self._py and px < self._px + self._pw and py < self._py + self._ph
+    }
+
+    // The day under (px, py) in the shown month, or 0.
+    define _day_at(self, px: Int, py: Int) -> Int {
+        c := self._cell
+        gx := (px - self._px - 6) / c
+        gy := (py - self._py - 6 - 2 * c) / c
+        if px < self._px + 6 or py < self._py + 6 + 2 * c or gx < 0 or gx > 6 { return 0 }
+        d := gy * 7 + gx - weekday(self._vy, self._vm, 1) + 1
+        if d < 1 or d > days_in_month(self._vy, self._vm) { return 0 }
+        return d
+    }
+
+    define popup_handle(self, e: window.Event) -> Bool {
+        if e.kind == "mouse_down" and e.button == 1 {
+            c := self._cell
+            if e.y < self._py + 6 + c {
+                if e.x < self._px + 6 + c { self._shift_month(-1) }
+                elif e.x >= self._px + self._pw - 6 - c { self._shift_month(1) }
+                return true
+            }
+            d := self._day_at(e.x, e.y)
+            if d > 0 {
+                self.set_date(self._vy, self._vm, d)
+                self.close()
+            }
+            return true
+        }
+        if e.kind == "mouse_move" {
+            d := self._day_at(e.x, e.y)
+            if d > 0 { self._cursor = d }
+            return true
+        }
+        return true
+    }
+
+    define popup_key(self, e: window.Event) -> Bool {
+        if e.kind != "key_down" { return e.kind == "key_up" or e.kind == "text" or e.kind == "compose" }
+        k := e.key
+        if k == "left" { self._shift_day(-1) }
+        elif k == "right" { self._shift_day(1) }
+        elif k == "up" { self._shift_day(-7) }
+        elif k == "down" { self._shift_day(7) }
+        elif k == "pageup" { self._shift_month(-1) }
+        elif k == "pagedown" { self._shift_month(1) }
+        elif k == "home" { self._cursor = 1 }
+        elif k == "end" { self._cursor = days_in_month(self._vy, self._vm) }
+        elif k == "return" or k == "keypad_enter" or k == "space" {
+            self.set_date(self._vy, self._vm, self._cursor)
+            self.close()
+        } elif k == "escape" or k == "tab" {
+            self.close()
+        }
+        return true
+    }
+
+    define draw(self, win: window.Window, t: Theme) -> void {
+        win.rect(self.x, self.y, self.width, self.height, t.input)
+        border := t.border
+        if self.focused or self.is_open { border = t.accent }
+        win.rect(self.x, self.y, self.width, self.height, border, fill=false)
+        win.text(self.text(), self.x + 8, self.y + (self.height - t.line()) / 2, _ink(self, t.text, t), scale=t.scale, font=t.font)
+        // A small calendar glyph on the right.
+        gx := self.x + self.width - 8 - 2 * t.char_w()
+        gy := self.y + (self.height - t.line()) / 2 + 2
+        gs := t.line() - 4
+        win.rect(gx, gy, gs, gs, _ink(self, t.muted, t), fill=false)
+        win.rect(gx, gy, gs, 3, _ink(self, t.muted, t))
+    }
+
+    define draw_popup(self, win: window.Window, t: Theme) -> void {
+        c := _max(t.line() + 8, 3 * t.char_w() + 6)
+        self._cell = c
+        self._pw = 7 * c + 12
+        self._ph = 8 * c + 12
+        self._px = self.x
+        self._py = self.y + self.height + 2
+        if self._px + self._pw > win.width() { self._px = _max(0, win.width() - self._pw) }
+        if self._py + self._ph > win.height() and self.y - self._ph - 2 >= 0 { self._py = self.y - self._ph - 2 }
+        // Neither fits: keep it inside the window.
+        self._py = _clamp(self._py, 0, _max(0, win.height() - self._ph))
+        x := self._px
+        y := self._py
+        win.rect(x + 3, y + 3, self._pw, self._ph, mix(t.background, window.black(), 45))
+        win.rect(x, y, self._pw, self._ph, t.surface)
+        win.rect(x, y, self._pw, self._ph, t.border, fill=false)
+        // Header: < Month Year >
+        hy := y + 6 + (c - t.line()) / 2
+        win.text("<", x + 6 + (c - t.char_w()) / 2, hy, t.text, scale=t.scale, font=t.font)
+        win.text(">", x + self._pw - 6 - c + (c - t.char_w()) / 2, hy, t.text, scale=t.scale, font=t.font)
+        title := _MONTHS[self._vm - 1].str() + " " + self._vy.str()
+        win.text(title, x + (self._pw - t.text_w(title)) / 2, hy, t.text, scale=t.scale, font=t.font)
+        // Weekday names.
+        names := ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"]
+        i := 0
+        while i < 7 {
+            wd: String = names[i]
+            win.text(wd, x + 6 + i * c + (c - t.text_w(wd)) / 2, y + 6 + c + (c - t.line()) / 2, t.muted, scale=t.scale, font=t.font)
+            i = i + 1
+        }
+        // Days.
+        first := weekday(self._vy, self._vm, 1)
+        count := days_in_month(self._vy, self._vm)
+        d := 1
+        while d <= count {
+            cell := first + d - 1
+            cx := x + 6 + (cell % 7) * c
+            cy := y + 6 + 2 * c + (cell / 7) * c
+            ink := t.text
+            chosen := d == self.day and self._vm == self.month and self._vy == self.year
+            if chosen {
+                win.rect(cx + 1, cy + 1, c - 2, c - 2, t.accent)
+                ink = t.accent_text
+            }
+            if d == self._cursor { win.rect(cx + 1, cy + 1, c - 2, c - 2, t.focus, fill=false) }
+            label := d.str()
+            win.text(label, cx + (c - t.text_w(label)) / 2, cy + (c - t.line()) / 2, ink, scale=t.scale, font=t.font)
+            d = d + 1
+        }
+    }
+}

@@ -1,0 +1,449 @@
+// ui: TreeNode, TreeView
+
+from typing.primitives.string use { String }
+from typing.collections.list use { List }
+use window
+from .util use { mix, _clamp, _max, _min }
+from .theme use { Theme }
+from .widget use { Widget, _clip_pop, _clip_push, _ink }
+from .access use { AccessNode }
+
+---
+One node of a `ui.TreeView`: `text`, `children` (TreeNodes), whether it's
+`expanded`, and `data` — anything you want to keep with it.
+`add(child)` adds a child and returns it.
+---
+struct TreeNode {
+    text: String
+    children: List
+    expanded: Bool
+    data: Any
+    parent: TreeNode
+
+    define __init(self, text: String, children: List = [], expanded: Bool = false, data: Any = null) -> void {
+        self.text = text
+        self.children = []
+        self.expanded = expanded
+        self.data = data
+        self.parent = null
+        for c in children {
+            n: TreeNode = c
+            self.add(n)
+        }
+    }
+
+    --- Add `child` under this node; returns it. ---
+    define add(self, child: TreeNode) -> TreeNode {
+        child.parent = self
+        self.children.append(child)
+        return child
+    }
+
+    --- How deep it is (0 for a root). ---
+    define depth(self) -> Int {
+        d := 0
+        p := self.parent
+        while p != null {
+            d = d + 1
+            p = p.parent
+        }
+        return d
+    }
+}
+
+---
+A tree of `ui.TreeNode`s, nested nodes indented. Click the arrow (or
+double-click the row) to expand / collapse; click a row to select it.
+Keys: Up / Down move, Right expands (or goes to the first child), Left
+collapses (or goes to the parent), Enter toggles. `on_select(node)` runs
+when the selection changes; `selected` is the node (or null);
+`on_expand(node)` runs just before a node opens (fill in its children
+then: a folder read lazily).
+
+`flat=true` is the look of a side bar (a file explorer): no box, rows lit
+under the mouse, the selected row tinted (outlined while focused), thin
+chevrons, and a click on a parent opens / closes it. `row_height`,
+`indent`, `guides` (lines down each level) and `icon` — `fn(node)` giving
+`[text, colour]` (a badge before the name: "Q", "{}") or null — fine-tune
+either look; `background` fills it (-1: the theme's input colour, or
+nothing when flat).
+---
+struct TreeView : Widget {
+    roots: List
+    selected: TreeNode
+    on_select: Callable
+    on_expand: Callable
+    rows: Int
+    flat: Bool
+    row_height: Int
+    guides: Bool
+    icon: Callable
+    background: Int
+    _top: Int
+    _ind: Int
+    define access_action(self, action: String, value: String, node: AccessNode) -> Bool {
+        if node.data == null or not self.enabled { return false }
+        tn: TreeNode = node.data
+        if action == "select" {
+            self.select(tn)
+        } elif (action == "expand" and not tn.expanded) or (action == "collapse" and tn.expanded) {
+            self.toggle(tn)
+        } else {
+            return false
+        }
+        return true
+    }
+
+    define access_role(self) -> String {
+        return "tree"
+    }
+
+    define access_value(self) -> String {
+        if self.selected == null { return "" }
+        return self.selected.text
+    }
+
+    define _a11y_children(self) -> List {
+        return self._a11y_nodes(self.roots, 1)
+    }
+
+    // Tree items, nested — the children of an expanded node only.
+    define _a11y_nodes(self, nodes: List, level: Int) -> List {
+        out := []
+        for nd in nodes {
+            tn: TreeNode = nd
+            item := AccessNode("treeitem", tn.text, "", self.x, self.y, self.width, 0)._item(self, -1)
+            item.data = tn
+            item.level = level
+            if tn.children.length() > 0 {
+                item.states.append(tn.expanded ? "expanded" : "collapsed")
+                if tn.expanded { item.children = self._a11y_nodes(tn.children, level + 1) }
+            }
+            if self.selected != null and tn == self.selected { item.states.append("selected") }
+            out.append(item)
+        }
+        return out
+    }
+
+
+    define __init(self, roots: List, on_select: Callable = null, rows: Int = 8, expand: Bool = false,
+                  flat: Bool = false, row_height: Int = 24, indent: Int = 16, guides: Bool = false,
+                  icon: Callable = null, on_expand: Callable = null, background: Int = -1) -> void {
+        super().__init()
+        self.roots = roots
+        self.selected = null
+        self.on_select = on_select
+        self.on_expand = on_expand
+        self.rows = rows
+        self.expand = expand
+        self.flat = flat
+        self.row_height = row_height
+        self.guides = guides
+        self.icon = icon
+        self.background = background
+        self._top = 0
+        self._ind = indent
+        self.focusable = true
+    }
+
+    --- How far each level is indented (pixels). ---
+    define indent(self) -> Int {
+        return self._ind
+    }
+
+    define set_indent(self, px: Int) -> void {
+        self._ind = _max(0, px)
+    }
+
+    define _row_h(self) -> Int {
+        return self.row_height
+    }
+
+    define _open(self, node: TreeNode) -> void {
+        if self.on_expand != null { self.on_expand(node) }
+        node.expanded = true
+    }
+
+    define _pad(self) -> Int {
+        return self.flat ? 0 : 2
+    }
+
+    define _shown(self) -> Int {
+        return _max(1, (self.height - 2 * self._pad()) / self._row_h())
+    }
+
+    define _flatten(self, nodes: List, out: List) -> void {
+        for c in nodes {
+            n: TreeNode = c
+            out.append(n)
+            if n.expanded { self._flatten(n.children, out) }
+        }
+    }
+
+    --- The nodes on screen in order (expanded parents' children included). ---
+    define visible_nodes(self) -> List {
+        out := []
+        self._flatten(self.roots, out)
+        return out
+    }
+
+    define _index_of(self, vis: List, n: TreeNode) -> Int {
+        i := 0
+        while i < vis.length() {
+            v: TreeNode = vis[i]
+            if v == n { return i }
+            i = i + 1
+        }
+        return -1
+    }
+
+    --- Select `node` (null: none); runs `on_select` if it changed. ---
+    define select(self, node: TreeNode) -> void {
+        if node == self.selected { return }
+        self.selected = node
+        if node != null {
+            vis := self.visible_nodes()
+            i := self._index_of(vis, node)
+            if i >= 0 {
+                if i < self._top { self._top = i }
+                if i >= self._top + self._shown() { self._top = i - self._shown() + 1 }
+            }
+        }
+        if self.on_select != null { self.on_select(node) }
+    }
+
+    --- Expand or collapse `node`. ---
+    define toggle(self, node: TreeNode) -> void {
+        if node.children.length() == 0 { return }
+        if node.expanded { node.expanded = false } else { self._open(node) }
+        // A selected node hidden by the collapse: select the collapsed one.
+        if not node.expanded and self.selected != null {
+            p := self.selected.parent
+            while p != null {
+                if p == node {
+                    self.select(node)
+                    return
+                }
+                p = p.parent
+            }
+        }
+    }
+
+    define measure(self, t: Theme) -> void {
+        widest := 10
+        for c in self.visible_nodes() {
+            n: TreeNode = c
+            widest = _max(widest, n.depth() * self._ind + 16 + t.text_w(n.text) + (self.icon != null ? 18 : 0))
+        }
+        self.min_w = _min(widest, 60 * t.char_w()) + 16
+        self.min_h = self.rows * self._row_h() + 2 * self._pad()
+    }
+
+    --- The node on the row at (px, py) (null: none there). ---
+    define node_at(self, px: Int, py: Int) -> TreeNode {
+        if px < self.x or px >= self.x + self.width or py < self.y + self._pad() { return null }
+        vis := self.visible_nodes()
+        i := self._top + (py - self.y - self._pad()) / self._row_h()
+        if i < 0 or i >= vis.length() { return null }
+        n: TreeNode = vis[i]
+        return n
+    }
+
+    define handle(self, e: window.Event) -> Bool {
+        if not self.enabled { return false }
+        vis := self.visible_nodes()
+        // A right-click selects its row for the context menu — quietly: no
+        // toggle, no on_select (it isn't a pick: a file isn't opened).
+        if e.kind == "mouse_down" and e.button == 3 {
+            n := self.node_at(e.x, e.y)
+            if n != null { self.selected = n }
+            return true
+        }
+        if e.kind == "mouse_down" and e.button == 1 {
+            row := (e.y - self.y - self._pad()) / self._row_h()
+            i := self._top + row
+            if row >= 0 and i < vis.length() {
+                n: TreeNode = vis[i]
+                arrow_x := self.x + 6 + n.depth() * self._ind
+                if self.flat {
+                    if e.clicks <= 1 { self.toggle(n) }            // a click opens / closes a parent (not again on a double-click)
+                } elif e.clicks >= 2 or (e.x >= arrow_x - 2 and e.x < arrow_x + 14) {
+                    self.toggle(n)
+                }
+                self.select(n)
+            }
+            return true
+        }
+        if e.kind == "mouse_up" { return true }
+        if e.kind == "wheel" {
+            most := _max(0, vis.length() - self._shown())
+            self._top = _clamp(self._top - e.dy, 0, most)
+            return true
+        }
+        if e.kind != "key_down" or vis.length() == 0 { return false }
+        k := e.key
+        cur := self._index_of(vis, self.selected)
+        if k == "down" {
+            self.select(vis[_min(vis.length() - 1, cur + 1)])
+        } elif k == "up" {
+            self.select(vis[_max(0, cur - 1)])
+        } elif k == "home" {
+            self.select(vis[0])
+        } elif k == "end" {
+            self.select(vis[vis.length() - 1])
+        } elif self.selected == null {
+            return false
+        } elif k == "right" {
+            n := self.selected
+            if n.children.length() > 0 and not n.expanded {
+                self._open(n)
+            } elif n.children.length() > 0 {
+                self.select(n.children[0])
+            }
+        } elif k == "left" {
+            n := self.selected
+            if n.expanded {
+                n.expanded = false
+            } elif n.parent != null {
+                self.select(n.parent)
+            }
+        } elif k == "return" or k == "keypad_enter" or k == "space" {
+            self.toggle(self.selected)
+        } else {
+            return false
+        }
+        return true
+    }
+
+    // The badge `icon(node)` gives, at tx; where the name starts.
+    define _draw_icon(self, win: window.Window, t: Theme, n: TreeNode, tx: Int, ry: Int, rh: Int) -> Int {
+        if self.icon == null { return tx }
+        got := self.icon(n)
+        if got == null { return tx }
+        parts: List = got
+        label := String(parts[0])
+        color: Int = parts[1]
+        if label != "" {
+            lw := t.text_w(label)
+            win.text(label, tx + _max(0, (14 - lw) / 2), ry + (rh - t.line()) / 2, _ink(self, color, t), scale=t.scale, font=t.font)
+        }
+        return tx + 20
+    }
+
+    // The side-bar look (flat=true).
+    define _draw_flat(self, win: window.Window, t: Theme) -> void {
+        base := self.background != -1 ? self.background : t.background
+        if self.background != -1 { win.rect(self.x, self.y, self.width, self.height, base) }
+        vis := self.visible_nodes()
+        rh := self._row_h()
+        shown := self._shown()
+        most := _max(0, vis.length() - shown)
+        if self._top > most { self._top = most }
+        hover_row := -1
+        if self.hovered {
+            m := win.mouse()
+            if m.0 >= self.x and m.0 < self.x + self.width and m.1 >= self.y {
+                hover_row = (m.1 - self.y) / rh
+            }
+        }
+        guide := mix(base, t.text, 14)
+        _clip_push(win, self.x, self.y, self.width, self.height)
+        i := self._top
+        while i < vis.length() and i < self._top + shown {
+            n: TreeNode = vis[i]
+            ry := self.y + (i - self._top) * rh
+            if n == self.selected {
+                if self.focused {
+                    win.rect(self.x, ry, self.width, rh, mix(base, t.accent, 28))
+                    win.rect(self.x, ry, self.width, rh, t.accent, fill=false)
+                } else {
+                    win.rect(self.x, ry, self.width, rh, mix(base, t.text, 13))
+                }
+            } elif i - self._top == hover_row {
+                win.rect(self.x, ry, self.width, rh, mix(base, t.text, 7))
+            }
+            depth := n.depth()
+            if self.guides {
+                d := 0
+                while d < depth {
+                    win.rect(self.x + 10 + d * self._ind, ry, 1, rh, guide)
+                    d = d + 1
+                }
+            }
+            ax := self.x + 6 + depth * self._ind
+            cy := ry + rh / 2
+            ink := _ink(self, t.text, t)
+            if n.children.length() > 0 {
+                // A thin chevron: › closed, ⌄ open.
+                if n.expanded {
+                    win.line(ax, cy - 2, ax + 4, cy + 2, ink)
+                    win.line(ax + 4, cy + 2, ax + 8, cy - 2, ink)
+                } else {
+                    win.line(ax + 2, cy - 4, ax + 6, cy, ink)
+                    win.line(ax + 6, cy, ax + 2, cy + 4, ink)
+                }
+            }
+            tx := self._draw_icon(win, t, n, ax + 16, ry, rh)
+            win.text(n.text, tx, ry + (rh - t.line()) / 2, ink, scale=t.scale, font=t.font)
+            i = i + 1
+        }
+        _clip_pop(win)
+        if vis.length() > shown and self.hovered {
+            bar := _max(16, self.height * shown / vis.length())
+            by := self.y + (self.height - bar) * self._top / _max(1, most)
+            win.rect(self.x + self.width - 8, by, 8, bar, mix(base, t.text, 22))
+        }
+    }
+
+    define draw(self, win: window.Window, t: Theme) -> void {
+        if self.flat {
+            self._draw_flat(win, t)
+            return
+        }
+        win.rect(self.x, self.y, self.width, self.height, self.background != -1 ? self.background : t.input)
+        border := t.border
+        if self.focused { border = t.accent }
+        win.rect(self.x, self.y, self.width, self.height, border, fill=false)
+        vis := self.visible_nodes()
+        rh := self._row_h()
+        shown := self._shown()
+        most := _max(0, vis.length() - shown)
+        if self._top > most { self._top = most }
+        _clip_push(win, self.x + 1, self.y + 1, self.width - 2, self.height - 2)
+        i := self._top
+        while i < vis.length() and i < self._top + shown {
+            n: TreeNode = vis[i]
+            ry := self.y + 2 + (i - self._top) * rh
+            ink := t.text
+            if n == self.selected {
+                win.rect(self.x + 2, ry, self.width - 4, rh, _ink(self, t.accent, t))
+                ink = t.accent_text
+            }
+            ax := self.x + 6 + n.depth() * self._ind
+            cy := ry + rh / 2
+            if n.children.length() > 0 {
+                // A small triangle: pointing right (collapsed) or down (expanded).
+                r := 0
+                while r <= 4 {
+                    if n.expanded {
+                        win.line(ax + r, cy - 2 + r, ax + 8 - r, cy - 2 + r, _ink(self, ink, t))
+                    } else {
+                        win.line(ax + 2 + r, cy - 4 + r, ax + 2 + r, cy + 4 - r, _ink(self, ink, t))
+                    }
+                    r = r + 1
+                }
+            }
+            tx := ax + 14
+            tx = self._draw_icon(win, t, n, tx, ry, rh)
+            win.text(n.text, tx, ry + (rh - t.line()) / 2, _ink(self, ink, t), scale=t.scale, font=t.font)
+            i = i + 1
+        }
+        _clip_pop(win)
+        if vis.length() > shown {
+            track := self.height - 4
+            bar := _max(8, track * shown / vis.length())
+            by := self.y + 2 + (track - bar) * self._top / _max(1, most)
+            win.rect(self.x + self.width - 5, by, 3, bar, t.muted)
+        }
+    }
+}

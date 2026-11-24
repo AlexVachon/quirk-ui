@@ -1,0 +1,173 @@
+// ui: TextInput
+
+from typing.primitives.string use { String }
+from typing.collections.list use { List }
+use window
+from .util use { mix, _clamp, _max, _min }
+from .theme use { Theme }
+from .widget use { _clip_pop, _clip_push, _ink, _sel_color }
+from .text_edit use { TextEdit }
+
+---
+A one-line text field. Type when it has the focus (click it or Tab to
+it); editing, selection and copy / paste as described for `TextEdit`.
+`on_change(text)` runs on every edit, `on_submit(text)` on Enter.
+`columns` sets its width in characters.
+---
+struct TextInput : TextEdit {
+    placeholder: String
+    columns: Int
+    on_submit: Callable
+    _scroll: Int
+    _voff: Int
+    // A placeholder names a field nothing else names, and describes it.
+    define _a11y_fallback(self) -> String {
+        if self.placeholder != "" { return self.placeholder }
+        return self.tooltip
+    }
+
+    define _a11y_description(self) -> String {
+        return self.placeholder
+    }
+
+
+    define __init(self, text: String = "", placeholder: String = "", on_change: Callable = null, on_submit: Callable = null, columns: Int = 20) -> void {
+        super().__init(text, on_change)
+        self.placeholder = placeholder
+        self.columns = columns
+        self.on_submit = on_submit
+        self.single_line = true
+        self._scroll = 0
+        self._voff = 0
+    }
+
+    define measure(self, t: Theme) -> void {
+        self._t = t
+        self._cw = t.char_w()
+        self._lh = t.line()
+        self.min_w = self.columns * t.char_w() + 16
+        self.min_h = t.line() + 12
+    }
+
+    define index_at(self, px: Int, py: Int) -> Int {
+        if self._bidi(self.text) {
+            return self._t.font.index_at(self.text, px - self.x - 8 - self._voff)
+        }
+        return self._index_near(self._scroll, self.text.length(), px - self.x - 8)
+    }
+
+    define handle(self, e: window.Event) -> Bool {
+        if not self.enabled { return false }
+        if self._edit(e) { return true }
+        if e.kind != "key_down" { return false }
+        k := e.key
+        n := self.text.length()
+        if k == "home" or (k == "up" and not e.shift) {
+            self._move(0, e.shift)
+        } elif k == "end" or (k == "down" and not e.shift) {
+            self._move(n, e.shift)
+        } elif k == "return" or k == "keypad_enter" {
+            if self.on_submit != null { self.on_submit(self.text) }
+        } else {
+            return false
+        }
+        return true
+    }
+
+    define draw(self, win: window.Window, t: Theme) -> void {
+        self._fix()
+        win.rect(self.x, self.y, self.width, self.height, t.input)
+        border := t.border
+        if self.focused {
+            border = t.accent
+        } elif self.hovered {
+            border = mix(t.border, t.text, 30)
+        }
+        win.rect(self.x, self.y, self.width, self.height, border, fill=false)
+        self._t = t
+        avail := _max(1, self.width - 16)
+        n := self.text.length()
+        if n > 0 and self._bidi(self.text) {
+            self._draw_bidi(win, t, avail)
+            return
+        }
+        // Keep the cursor in view.
+        if self.cursor < self._scroll { self._scroll = self.cursor }
+        while self._scroll < self.cursor and self._span_w(self._scroll, self.cursor) > avail { self._scroll = self._scroll + 1 }
+        self._scroll = _clamp(self._scroll, 0, _max(0, n - 1))
+        // The last character that fits.
+        end := self._index_near(self._scroll, n, avail)
+        while end > self._scroll and self._span_w(self._scroll, end) > avail { end = end - 1 }
+        ty := self.y + (self.height - t.line()) / 2
+        if n == 0 {
+            // (Focused too, behind the cursor: a palette's field always is.)
+            if self.placeholder.length() > 0 {
+                win.text(t.fit(self.placeholder, avail), self.x + 8, ty, t.muted, scale=t.scale, font=t.font)
+            }
+        } else {
+            if self.has_selection() {
+                a := _max(self.selection_start(), self._scroll)
+                b := _min(self.selection_end(), end)
+                if b > a {
+                    sx := self.x + 8 + self._span_w(self._scroll, a)
+                    win.rect(sx, ty, self._span_w(a, b), t.line(), _sel_color(self, t))
+                }
+            }
+            win.text(self.text.substring(self._scroll, end), self.x + 8, ty, _ink(self, t.text, t), scale=t.scale, font=t.font)
+        }
+        if not self.focused { self._compose = "" }
+        if self.focused {
+            cx := self.x + 8 + self._span_w(self._scroll, self.cursor)
+            if self._compose != "" {
+                // Inline: the composition at the cursor, the rest after it.
+                _clip_push(win, self.x + 1, self.y + 1, self.width - 2, self.height - 2)
+                win.rect(cx, self.y + 1, _max(0, self.x + self.width - 1 - cx), self.height - 2, t.input)
+                cw := self._draw_compose(win, t, cx, ty)
+                if end > self.cursor {
+                    win.text(self.text.substring(self.cursor, end), cx + cw, ty, _ink(self, t.text, t), scale=t.scale, font=t.font)
+                }
+                _clip_pop(win)
+            } else {
+                win.text_input_area(cx, ty, 1, t.line())
+                if (window.ticks() / 530) % 2 == 0 { win.rect(cx, ty, _max(1, t.scale), t.line(), t.text) }
+            }
+        }
+    }
+
+    // Right-to-left or mixed text: the font lays the whole line out in
+    // visual order; it's aligned right when it reads right to left and
+    // shifted to keep the cursor in view (clipped to the field).
+    define _draw_bidi(self, win: window.Window, t: Theme, avail: Int) -> void {
+        f := t.font
+        ty := self.y + (self.height - t.line()) / 2
+        self._scroll = 0
+        off := 0
+        if window.is_rtl(self.text) { off = avail - f.width(self.text) }
+        ccx := f.caret_x(self.text, self.cursor)
+        if off + ccx > avail { off = avail - ccx }
+        if off + ccx < 0 { off = -ccx }
+        self._voff = off
+        x0 := self.x + 8 + off
+        _clip_push(win, self.x + 1, self.y + 1, self.width - 2, self.height - 2)
+        if self.has_selection() {
+            for piece in f.selection(self.text, self.selection_start(), self.selection_end()) {
+                pc: List = piece
+                px: Int = pc[0]
+                pw: Int = pc[1]
+                win.rect(x0 + px, ty, pw, t.line(), _sel_color(self, t))
+            }
+        }
+        win.text(self.text, x0, ty, _ink(self, t.text, t), scale=t.scale, font=f)
+        if not self.focused { self._compose = "" }
+        if self.focused {
+            cx := x0 + ccx
+            if self._compose != "" {
+                self._draw_compose(win, t, cx, ty)
+            } else {
+                win.text_input_area(cx, ty, 1, t.line())
+                if (window.ticks() / 530) % 2 == 0 { win.rect(cx, ty, _max(1, t.scale), t.line(), t.text) }
+            }
+        }
+        _clip_pop(win)
+    }
+}

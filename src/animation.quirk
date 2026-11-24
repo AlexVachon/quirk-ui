@@ -1,0 +1,82 @@
+// ui: lerp, ease, Animation
+
+from typing.primitives.string use { String }
+from typing.collections.list use { List }
+use window
+from .util use { _max }
+
+--- `a` + (`b` - `a`) * `t` (t from 0.0 to 1.0), rounded. ---
+define lerp(a: Int, b: Int, t: Double) -> Int {
+    r := a.to_float() + (b - a).to_float() * t
+    if r >= 0.0 { return (r + 0.5).to_int() }
+    return (r - 0.5).to_int()
+}
+
+---
+Easing: progress `t` (0.0-1.0) reshaped — "linear", "in" (starts slow),
+"out" (ends slow), "in_out" (both), "back" (overshoots a little, then
+settles).
+---
+define ease(name: String, t: Double) -> Double {
+    x := t
+    if x < 0.0 { x = 0.0 }
+    if x > 1.0 { x = 1.0 }
+    if name == "in" { return x * x * x }
+    if name == "out" {
+        y := 1.0 - x
+        return 1.0 - y * y * y
+    }
+    if name == "in_out" {
+        if x < 0.5 { return 4.0 * x * x * x }
+        y := -2.0 * x + 2.0
+        return 1.0 - y * y * y / 2.0
+    }
+    if name == "back" {
+        c := 1.70158
+        y := x - 1.0
+        return 1.0 + (c + 1.0) * y * y * y + c * y * y
+    }
+    return x
+}
+
+---
+A running animation (`app.animate`). `cancel()` stops it (no more
+`on_step`, no `on_done`); `done` says whether it has finished.
+---
+struct Animation {
+    start: Int
+    duration: Int
+    on_step: Callable
+    on_done: Callable
+    easing: String
+    done: Bool
+
+    define __init(self, duration: Int, on_step: Callable, easing: String, on_done: Callable) -> void {
+        self.start = window.ticks()
+        self.duration = _max(0, duration)
+        self.on_step = on_step
+        self.on_done = on_done
+        self.easing = easing
+        self.done = false
+    }
+
+    --- Stop it where it is. ---
+    define cancel(self) -> void {
+        self.done = true
+    }
+
+    // Run one frame at time `now`; true while it's still going.
+    define _tick(self, now: Int) -> Bool {
+        if self.done { return false }
+        p := 1.0
+        if self.duration > 0 { p = (now - self.start).to_float() / self.duration.to_float() }
+        if p > 1.0 { p = 1.0 }
+        if self.on_step != null { self.on_step(ease(self.easing, p)) }
+        if p >= 1.0 {
+            self.done = true
+            if self.on_done != null { self.on_done() }
+            return false
+        }
+        return true
+    }
+}

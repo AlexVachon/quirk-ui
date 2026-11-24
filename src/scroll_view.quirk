@@ -1,0 +1,146 @@
+// ui: ScrollView
+
+from typing.primitives.string use { String }
+from typing.collections.list use { List }
+use window
+from .util use { mix, _clamp, _max, _min }
+from .theme use { Theme }
+from .widget use { Widget, _clip_pop, _clip_push, _focused_in }
+
+---
+Shows `content` (any widget, usually a Column) in an area `height`
+pixels tall that scrolls when the content is taller: mouse wheel, drag
+the scroll bar, or Tab to a widget that's out of view. `offset` is how
+far it's scrolled (pixels). With `expand` it takes its container's free
+height instead.
+---
+struct ScrollView : Widget {
+    content: Widget
+    max_height: Int
+    offset: Int
+    step: Int
+    _drag: Int
+    _seen_focus: Widget
+    define access_role(self) -> String {
+        return "scrollpane"
+    }
+
+
+    define __init(self, content: Widget, height: Int = 200, expand: Bool = false) -> void {
+        super().__init()
+        self.content = content
+        self.max_height = height
+        self.expand = expand
+        self.offset = 0
+        self.step = 40
+        self._drag = -1
+        self._seen_focus = null
+        self.takes_clicks = true
+    }
+
+    define children(self) -> List {
+        return [self.content]
+    }
+
+    define _bar_w(self) -> Int {
+        return 10
+    }
+
+    define _most(self) -> Int {
+        return _max(0, self.content.min_h - self.height)
+    }
+
+    --- Scroll so `pixels` from the top of the content is at the top (clamped). ---
+    define scroll_to(self, pixels: Int) -> void {
+        self.offset = _clamp(pixels, 0, self._most())
+    }
+
+    define measure(self, t: Theme) -> void {
+        self.content.measure(t)
+        self.min_w = self.content.min_w + self._bar_w()
+        self.min_h = _min(self.content.min_h, self.max_height)
+    }
+
+    define place(self, x: Int, y: Int, width: Int, height: Int) -> void {
+        self.x = x
+        self.y = y
+        self.width = width
+        self.height = height
+        self.offset = _clamp(self.offset, 0, self._most())
+        cw := width - self._bar_w()
+        ch := _max(self.content.min_h, height)
+        self.content.place(x, y - self.offset, cw, ch)
+        // Newly focused widget out of view (Tab): scroll to it, once.
+        f := _focused_in(self.content)
+        if f != null and f != self._seen_focus {
+            if f.y < y {
+                self.scroll_to(self.offset - (y - f.y))
+            } elif f.y + f.height > y + height {
+                self.scroll_to(self.offset + (f.y + f.height - y - height))
+            }
+            self.content.place(x, y - self.offset, cw, ch)
+        }
+        self._seen_focus = f
+    }
+
+    define _thumb(self) -> List {
+        track := self.height
+        bar := _max(16, track * self.height / _max(1, self.content.min_h))
+        ty := self.y + (track - bar) * self.offset / _max(1, self._most())
+        return [ty, bar]
+    }
+
+    define handle(self, e: window.Event) -> Bool {
+        if e.kind == "wheel" {
+            if self._most() == 0 { return false }
+            self.scroll_to(self.offset - e.dy * self.step)
+            return true
+        }
+        if e.kind == "mouse_down" and e.button == 1 and self._most() > 0 and e.x >= self.x + self.width - self._bar_w() {
+            th := self._thumb()
+            ty: Int = th[0]
+            bar: Int = th[1]
+            if e.y >= ty and e.y < ty + bar {
+                self._drag = e.y - ty
+            } else {
+                // Click on the track: jump there, then drag from the middle.
+                self._drag = bar / 2
+                self._drag_to(e.y)
+            }
+            return true
+        }
+        if e.kind == "mouse_move" and self._drag >= 0 {
+            self._drag_to(e.y)
+            return true
+        }
+        if e.kind == "mouse_up" {
+            self._drag = -1
+            return true
+        }
+        return false
+    }
+
+    define _drag_to(self, py: Int) -> void {
+        th := self._thumb()
+        bar: Int = th[1]
+        room := _max(1, self.height - bar)
+        rel := _clamp(py - self._drag - self.y, 0, room)
+        self.scroll_to(rel * self._most() / room)
+    }
+
+    define draw(self, win: window.Window, t: Theme) -> void {
+        _clip_push(win, self.x, self.y, self.width, self.height)
+        self.content.draw(win, t)
+        _clip_pop(win)
+        if self._most() > 0 {
+            th := self._thumb()
+            ty: Int = th[0]
+            bar: Int = th[1]
+            bx := self.x + self.width - self._bar_w() + 3
+            win.rect(bx, self.y, 4, self.height, mix(t.border, t.background, 40))
+            thumb := t.muted
+            if self._drag >= 0 or self.hovered { thumb = mix(t.muted, t.text, 40) }
+            win.rect(bx, ty, 4, bar, thumb)
+        }
+    }
+}

@@ -1,0 +1,274 @@
+// ui: Tabs
+
+from typing.primitives.string use { String }
+from typing.collections.list use { List }
+use window
+from .util use { mix, _clamp, _max }
+from .theme use { Theme }
+from .widget use { Widget, _ink }
+from .access use { AccessNode }
+
+---
+Pages under a row of tabs: `ui.Tabs(["General", "Advanced"], [page1, page2])`.
+Click a tab, or Left / Right when the tab row has the focus. `selected`
+is the page shown; `on_change(index, title)` runs when it changes;
+`add(title, page)` adds one, `close(i)` removes one.
+`closable=true` puts a × on each tab: clicking it (or middle-clicking the
+tab) calls `on_close(index)` — say, to ask about unsaved changes, then
+`close(index)` — or, without an `on_close`, closes the tab.
+---
+struct Tabs : Widget {
+    titles: List
+    pages: List
+    selected: Int
+    on_change: Callable
+    closable: Bool           // a × on each tab
+    on_close: Callable       // on_close(index) when it's clicked (else the tab just closes)
+    _tab_h: Int
+    _xs: List
+    _mx: Int
+    _my: Int
+    _cw: Int
+    define access_action(self, action: String, value: String, node: AccessNode) -> Bool {
+        if action != "select" or node.index < 0 or not self.enabled { return false }
+        self.select(node.index)
+        return true
+    }
+
+    define access_role(self) -> String {
+        return "tablist"
+    }
+
+    define access_value(self) -> String {
+        if self.selected < 0 or self.selected >= self.titles.length() { return "" }
+        return String(self.titles[self.selected])
+    }
+
+    // One "tab" per title, then the shown page as a "tabpanel".
+    define _a11y_children(self) -> List {
+        out := []
+        i := 0
+        while i < self.titles.length() {
+            tab := AccessNode("tab", String(self.titles[i]))._item(self, i)
+            if i == self.selected { tab.states.append("selected") }
+            out.append(tab)
+            i = i + 1
+        }
+        p := self.page()
+        if p != null and p.visible {
+            pw: Widget = p
+            panel := AccessNode("tabpanel", self.access_value(), "", pw.x, pw.y, pw.width, pw.height)
+            node := pw.access_node()
+            if node != null { panel.children.append(node) }
+            out.append(panel)
+        }
+        return out
+    }
+
+
+    define __init(self, titles: List, pages: List, selected: Int = 0, on_change: Callable = null, expand: Bool = false,
+                  closable: Bool = false, on_close: Callable = null) -> void {
+        super().__init()
+        self.titles = titles
+        self.pages = pages
+        self.selected = _clamp(selected, 0, _max(0, pages.length() - 1))
+        self.on_change = on_change
+        self.closable = closable
+        self.on_close = on_close
+        self.expand = expand
+        self._tab_h = 28
+        self._xs = []
+        self._mx = -1
+        self._my = -1
+        self._cw = 8
+        self.focusable = true
+    }
+
+    ---
+    Remove tab `i` (its title and page). The selection stays on the same
+    page when it can (the one after it when it's the one removed); runs
+    `on_change` when the page shown changes.
+    ---
+    define close(self, i: Int) -> void {
+        if i < 0 or i >= self.pages.length() { return }
+        shown := self.selected
+        self.titles.remove_at(i)
+        self.pages.remove_at(i)
+        n := self.pages.length()
+        if n == 0 {
+            self.selected = 0
+            return
+        }
+        if i < shown {
+            self.selected = shown - 1                       // the same page, one place left
+        } elif i == shown {
+            self.selected = _clamp(shown, 0, n - 1)         // the next one (or the new last)
+            if self.on_change != null { self.on_change(self.selected, self.titles[self.selected]) }
+        }
+    }
+
+    --- Add a page with its tab title. ---
+    define add(self, title: String, page: Widget) -> void {
+        self.titles.append(title)
+        self.pages.append(page)
+    }
+
+    --- Show page `i` (clamped); runs `on_change` if it changed. ---
+    define select(self, i: Int) -> void {
+        if self.pages.length() == 0 { return }
+        ni := _clamp(i, 0, self.pages.length() - 1)
+        if ni != self.selected {
+            self.selected = ni
+            if self.on_change != null { self.on_change(ni, self.titles[ni]) }
+        }
+    }
+
+    --- The page being shown (null when there are none). ---
+    define page(self) -> Widget {
+        if self.selected < 0 or self.selected >= self.pages.length() { return null }
+        return self.pages[self.selected]
+    }
+
+    define children(self) -> List {
+        p := self.page()
+        if p == null { return [] }
+        return [p]
+    }
+
+    define measure(self, t: Theme) -> void {
+        self._tab_h = t.line() + 12
+        tw := 0
+        for title in self.titles { tw = tw + t.text_w(title.str()) + (self.closable ? 6 : 3) * t.char_w() }
+        pw := 0
+        ph := 0
+        for pg in self.pages {
+            w: Widget = pg
+            w.measure(t)
+            pw = _max(pw, w.min_w)
+            ph = _max(ph, w.min_h)
+        }
+        self.min_w = _max(tw, pw + 16)
+        self.min_h = self._tab_h + ph + 16
+    }
+
+    define place(self, x: Int, y: Int, width: Int, height: Int) -> void {
+        self.x = x
+        self.y = y
+        self.width = width
+        self.height = height
+        p := self.page()
+        if p != null { p.place(x + 8, y + self._tab_h + 8, width - 16, height - self._tab_h - 16) }
+    }
+
+    // Is x on tab i's × (with the char width the last draw used)?
+    define _on_close_box(self, i: Int, px: Int) -> Bool {
+        if i + 1 >= self._xs.length() { return false }
+        b: Int = self._xs[i + 1]
+        size := self._cw * 2
+        return px >= b - size - 8 and px < b - 4
+    }
+
+    // The tab under x, or -1.
+    define _tab_at(self, px: Int) -> Int {
+        i := 0
+        while i + 1 < self._xs.length() {
+            a: Int = self._xs[i]
+            b: Int = self._xs[i + 1]
+            if px >= a and px < b { return i }
+            i = i + 1
+        }
+        return -1
+    }
+
+    define handle(self, e: window.Event) -> Bool {
+        if not self.enabled { return false }
+        if e.kind == "mouse_move" {
+            self._mx = e.x
+            self._my = e.y
+            return false
+        }
+        if e.kind == "mouse_down" and (e.button == 1 or e.button == 2) {
+            if e.y < self.y + self._tab_h {
+                i := self._tab_at(e.x)
+                if i >= 0 and self.closable and (e.button == 2 or self._on_close_box(i, e.x)) {
+                    // The ×, or a middle click on the tab.
+                    if self.on_close != null { self.on_close(i) } else { self.close(i) }
+                    return true
+                }
+                if i >= 0 and e.button == 1 { self.select(i) }
+            }
+            return true
+        }
+        if e.kind == "mouse_up" { return true }
+        if e.kind == "key_down" {
+            if e.key == "right" or (e.key == "tab" and e.ctrl and not e.shift) {
+                self.select((self.selected + 1) % _max(1, self.pages.length()))
+                return true
+            }
+            if e.key == "left" or (e.key == "tab" and e.ctrl and e.shift) {
+                self.select((self.selected + self.pages.length() - 1) % _max(1, self.pages.length()))
+                return true
+            }
+        }
+        return false
+    }
+
+    define draw(self, win: window.Window, t: Theme) -> void {
+        th := self._tab_h
+        win.rect(self.x, self.y + th, self.width, self.height - th, t.surface)
+        win.rect(self.x, self.y + th, self.width, self.height - th, t.border, fill=false)
+        xs := [self.x]
+        tx := self.x
+        i := 0
+        self._cw = t.char_w()
+        if self.closable and self.hovered {
+            pointer := win.mouse()                      // (mouse_move goes to the App, not to widgets)
+            self._mx = pointer.0
+            self._my = pointer.1
+        } elif not self.hovered {
+            self._mx = -1
+        }
+        while i < self.titles.length() {
+            title := self.titles[i].str()
+            w := t.text_w(title) + (self.closable ? 6 : 3) * t.char_w()
+            bg := t.background
+            ink := t.muted
+            if i == self.selected {
+                bg = t.surface
+                ink = t.text
+            } elif self.hovered {
+                ink = mix(t.muted, t.text, 40)
+            }
+            win.rect(tx, self.y, w, th + 1, bg)
+            win.rect(tx, self.y, w, th + 1, t.border, fill=false)
+            if i == self.selected {
+                win.rect(tx + 1, self.y + th, w - 2, 1, t.surface)                 // open into the page
+                win.rect(tx, self.y, w, 2, _ink(self, t.accent, t))
+            }
+            if self.closable {
+                // The title on the left, the × on the right (brighter under the mouse).
+                win.text(title, tx + t.char_w() + t.char_w() / 2, self.y + (th - t.line()) / 2,
+                         _ink(self, ink, t), scale=t.scale, font=t.font)
+                size := t.char_w() * 2
+                bx := tx + w - size - 6
+                over := self._my >= self.y and self._my < self.y + th and self._mx >= bx - 2 and self._mx < tx + w - 4
+                if over { win.rect(bx - 2, self.y + (th - size) / 2, size + 4, size, mix(bg, t.text, 15)) }
+                xink := over ? t.text : (i == self.selected ? t.muted : mix(t.muted, bg, 30))
+                win.text("×", bx + (size - t.text_w("×")) / 2, self.y + (th - t.line()) / 2,
+                         _ink(self, xink, t), scale=t.scale, font=t.font)
+            } else {
+                win.text(title, tx + (w - t.text_w(title)) / 2, self.y + (th - t.line()) / 2,
+                         _ink(self, ink, t), scale=t.scale, font=t.font)
+            }
+            tx = tx + w
+            xs.append(tx)
+            i = i + 1
+        }
+        self._xs = xs
+        if self.focused {
+            win.rect(self.x - 2, self.y - 2, tx - self.x + 4, th + 4, t.focus, fill=false)
+        }
+        p := self.page()
+        if p != null and p.visible { p.draw(win, t) }
+    }
+}

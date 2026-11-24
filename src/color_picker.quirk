@@ -1,0 +1,232 @@
+// ui: ColorPicker
+
+from typing.primitives.string use { String }
+from typing.collections.list use { List }
+use window
+from .util use { _clamp, _max, _min }
+from .theme use { Theme }
+from .widget use { Widget, _focus_ring, _ink }
+
+// HSV (hue 0-359, saturation / value 0-100) <-> colour, in whole numbers.
+define hsv_to_color(h: Int, sat: Int, v: Int) -> Int {
+    hh := ((h % 360) + 360) % 360
+    ss := _clamp(sat, 0, 100)
+    vv := _clamp(v, 0, 100)
+    c := vv * ss * 255 / 10000                 // chroma, 0-255
+    seg := hh / 60
+    f := hh % 60
+    x := c * (seg % 2 * 60 + (1 - 2 * (seg % 2)) * f) / 60
+    m := vv * 255 / 100 - c
+    r := 0
+    g := 0
+    b := 0
+    if seg == 0 {
+        r = c
+        g = x
+    } elif seg == 1 {
+        r = x
+        g = c
+    } elif seg == 2 {
+        g = c
+        b = x
+    } elif seg == 3 {
+        g = x
+        b = c
+    } elif seg == 4 {
+        r = x
+        b = c
+    } else {
+        r = c
+        b = x
+    }
+    return window.rgb(r + m, g + m, b + m)
+}
+
+--- [hue 0-359, saturation 0-100, value 0-100] of a colour. ---
+define color_to_hsv(color: Int) -> List {
+    ch := window.channels(color)
+    r: Int = ch[0]
+    g: Int = ch[1]
+    b: Int = ch[2]
+    mx := _max(r, _max(g, b))
+    mn := _min(r, _min(g, b))
+    d := mx - mn
+    h := 0
+    if d > 0 {
+        if mx == r {
+            h = (60 * (g - b) / d + 360) % 360
+        } elif mx == g {
+            h = 60 * (b - r) / d + 120
+        } else {
+            h = 60 * (r - g) / d + 240
+        }
+    }
+    sat := 0
+    if mx > 0 { sat = d * 100 / mx }
+    return [h, sat, mx * 100 / 255]
+}
+
+---
+Pick a colour: a square for saturation (left → right) and brightness
+(bottom → top), a strip for the hue, and a swatch with its hex code.
+Drag in either, or with the focus: Left / Right saturation, Up / Down
+brightness, Page Up / Page Down hue. `color` is the colour (a `window`
+colour Int); `on_change(color)` runs when it changes.
+---
+struct ColorPicker : Widget {
+    color: Int
+    hue: Int
+    saturation: Int
+    value: Int
+    on_change: Callable
+    size: Int
+    _drag: Int
+    define access_role(self) -> String {
+        return "colorpicker"
+    }
+
+    define access_value(self) -> String {
+        c := window.channels(self.color)
+        return "rgb(" + String(c[0]) + ", " + String(c[1]) + ", " + String(c[2]) + ")"
+    }
+
+
+    define __init(self, color: Int = window.rgb(76, 141, 255), on_change: Callable = null, size: Int = 128) -> void {
+        super().__init()
+        self.on_change = on_change
+        self.size = size
+        self._drag = 0
+        self.focusable = true
+        self.set_color(color)
+    }
+
+    --- Set the colour from code (no `on_change`). ---
+    define set_color(self, color: Int) -> void {
+        hsv := color_to_hsv(color)
+        h: Int = hsv[0]
+        sv: Int = hsv[1]
+        vv: Int = hsv[2]
+        self.hue = h
+        self.saturation = sv
+        self.value = vv
+        self.color = window.rgb(window.channels(color)[0], window.channels(color)[1], window.channels(color)[2])
+    }
+
+    --- The colour as "#rrggbb". ---
+    define hex(self) -> String {
+        ch := window.channels(self.color)
+        digits := "0123456789abcdef"
+        out := "#"
+        for v in [ch[0], ch[1], ch[2]] {
+            n: Int = v
+            out = out + digits.substring(n / 16, n / 16 + 1) + digits.substring(n % 16, n % 16 + 1)
+        }
+        return out
+    }
+
+    define _set_hsv(self, h: Int, sat: Int, v: Int) -> void {
+        self.hue = ((h % 360) + 360) % 360
+        self.saturation = _clamp(sat, 0, 100)
+        self.value = _clamp(v, 0, 100)
+        nc := hsv_to_color(self.hue, self.saturation, self.value)
+        if nc != self.color {
+            self.color = nc
+            if self.on_change != null { self.on_change(nc) }
+        }
+    }
+
+    define _strip_x(self) -> Int {
+        return self.x + self.size + 8
+    }
+
+    define measure(self, t: Theme) -> void {
+        self.min_w = self.size + 8 + 16
+        self.min_h = self.size + 8 + t.line() + 8
+    }
+
+    define _from_point(self, px: Int, py: Int) -> void {
+        if self._drag == 1 {
+            sat := _clamp(px - self.x, 0, self.size) * 100 / self.size
+            v := 100 - _clamp(py - self.y, 0, self.size) * 100 / self.size
+            self._set_hsv(self.hue, sat, v)
+        } elif self._drag == 2 {
+            h := _clamp(py - self.y, 0, self.size - 1) * 360 / self.size
+            self._set_hsv(h, self.saturation, self.value)
+        }
+    }
+
+    define handle(self, e: window.Event) -> Bool {
+        if not self.enabled { return false }
+        if e.kind == "mouse_down" and e.button == 1 {
+            // The square includes its right / bottom edge (full saturation, black).
+            if e.x <= self.x + self.size and e.y <= self.y + self.size {
+                self._drag = 1
+            } elif e.x >= self._strip_x() and e.y <= self.y + self.size {
+                self._drag = 2
+            } else {
+                self._drag = 0
+            }
+            self._from_point(e.x, e.y)
+            return true
+        }
+        if e.kind == "mouse_move" and self._drag > 0 {
+            self._from_point(e.x, e.y)
+            return true
+        }
+        if e.kind == "mouse_up" {
+            self._drag = 0
+            return true
+        }
+        if e.kind == "key_down" {
+            k := e.key
+            if k == "left" { self._set_hsv(self.hue, self.saturation - 5, self.value) }
+            elif k == "right" { self._set_hsv(self.hue, self.saturation + 5, self.value) }
+            elif k == "up" { self._set_hsv(self.hue, self.saturation, self.value + 5) }
+            elif k == "down" { self._set_hsv(self.hue, self.saturation, self.value - 5) }
+            elif k == "pageup" { self._set_hsv(self.hue + 10, self.saturation, self.value) }
+            elif k == "pagedown" { self._set_hsv(self.hue - 10, self.saturation, self.value) }
+            else { return false }
+            return true
+        }
+        return false
+    }
+
+    define draw(self, win: window.Window, t: Theme) -> void {
+        n := 16
+        cell := _max(1, self.size / n)
+        i := 0
+        while i < n {
+            j := 0
+            while j < n {
+                c := hsv_to_color(self.hue, i * 100 / (n - 1), 100 - j * 100 / (n - 1))
+                win.rect(self.x + i * cell, self.y + j * cell, cell, cell, c)
+                j = j + 1
+            }
+            i = i + 1
+        }
+        win.rect(self.x, self.y, n * cell, n * cell, t.border, fill=false)
+        // Marker on the square.
+        mx := self.x + self.saturation * self.size / 100
+        my := self.y + (100 - self.value) * self.size / 100
+        win.circle(mx, my, 5, window.white(), fill=false)
+        win.circle(mx, my, 6, window.black(), fill=false)
+        // Hue strip.
+        sx := self._strip_x()
+        segs := 32
+        seg_h := _max(1, self.size / segs)
+        k := 0
+        while k < segs {
+            win.rect(sx, self.y + k * seg_h, 16, seg_h, hsv_to_color(k * 360 / segs, 100, 100))
+            k = k + 1
+        }
+        win.rect(sx, self.y, 16, segs * seg_h, t.border, fill=false)
+        hy := self.y + self.hue * self.size / 360
+        win.rect(sx - 2, hy - 1, 20, 3, t.text)
+        // Swatch + hex.
+        by := self.y + self.size + 8
+        win.rect(self.x, by, 3 * t.line(), t.line() + 4, self.color)
+        win.rect(self.x, by, 3 * t.line(), t.line() + 4, t.border, fill=false)
+        win.text(self.hex(), self.x + 3 * t.line() + t.char_w(), by + 2, _ink(self, t.text, t), scale=t.scale, font=t.font)
+        if self.focused { _focus_ring(win, self, t) }
+    }
+}

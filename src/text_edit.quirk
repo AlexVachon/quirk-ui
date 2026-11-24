@@ -1,0 +1,469 @@
+// ui: TextEdit: the editing shared by TextInput and TextArea
+
+from typing.primitives.string use { String }
+from typing.collections.list use { List }
+use window
+from .util use { _clamp, _max, _min }
+from .theme use { Theme }
+from .widget use { Widget, _wordy }
+from .access use { AccessNode }
+
+---
+What TextInput and TextArea share: the text, a cursor and a selection,
+and the editing keys.
+  `text`             — the contents; set it to replace them
+  `cursor`           — position (0 = before the first character)
+  `has_selection()`, `selection_start()`, `selection_end()`,
+  `selected_text()`, `select(start, end)`, `select_all()`
+  `insert(s)`        — type `s` at the cursor (replacing the selection)
+  `copy()`, `cut()`, `paste()` — through the system clipboard
+  `undo()`, `redo()` — Ctrl+Z, Ctrl+Y / Ctrl+Shift+Z
+Keys: Shift + arrows / Home / End select, Ctrl+A selects everything,
+Ctrl+C / X / V copy, cut and paste (Cmd on macOS), Ctrl + Left / Right
+move by word, Ctrl + Backspace / Delete erase a word. Mouse: click to
+place the cursor, drag or Shift+click to select, double-click selects a
+word, triple-click a line.
+---
+struct TextEdit : Widget {
+    text: String
+    cursor: Int
+    anchor: Int
+    on_change: Callable
+    single_line: Bool
+    _dragging: Bool
+    _cw: Int
+    _lh: Int
+    _undo: List
+    _redo: List
+    _typing: Bool
+    _t: Theme
+    _compose: String
+    _compose_cursor: Int
+    _compose_len: Int
+    define access_action(self, action: String, value: String, node: AccessNode) -> Bool {
+        if action != "set_value" or not self.enabled { return false }
+        self._snapshot(false)
+        self.text = self.single_line ? value.replace("\n", " ") : value
+        self.cursor = self.text.length()
+        self.anchor = self.cursor
+        self._changed()
+        return true
+    }
+
+    define access_role(self) -> String {
+        return "textbox"
+    }
+
+    define access_value(self) -> String {
+        return self.text
+    }
+
+    define _a11y_states(self, out: List) -> void {
+        out.append("editable")
+        if not self.single_line { out.append("multiline") }
+        if self.has_selection() { out.append("has_selection") }
+    }
+
+
+    // The caret blinks (every 530 ms) while it has the focus.
+    define next_redraw(self) -> Int {
+        if not self.focused { return -1 }
+        return 530 - window.ticks() % 530
+    }
+
+    define __init(self, text: String = "", on_change: Callable = null) -> void {
+        super().__init()
+        self.text = text
+        self.cursor = text.length()
+        self.anchor = self.cursor
+        self.on_change = on_change
+        self.single_line = false
+        self._dragging = false
+        self._undo = []
+        self._redo = []
+        self._typing = false
+        self._t = null
+        self._cw = 8
+        self._lh = 16
+        self.focusable = true
+        self._compose = ""
+        self._compose_cursor = 0
+        self._compose_len = 0
+    }
+
+    define composing(self) -> Bool {
+        return self._compose != ""
+    }
+
+    define _text_w(self, s: String) -> Int {
+        if self._t == null { return s.length() * self._cw }
+        return self._t.text_w(s)
+    }
+
+    // The line the cursor is on reads right to left (Hebrew, Arabic...).
+    define _rtl_here(self) -> Bool {
+        a := self._line_start(self.cursor)
+        b := self._line_end(self.cursor)
+        if b <= a { return false }
+        return window.is_rtl(self.text.substring(a, b))
+    }
+
+    // `s` needs the font's visual layout (right-to-left or mixed text).
+    define _bidi(self, s: String) -> Bool {
+        return self._t != null and self._t.font != null and window.has_rtl(s)
+    }
+
+    // An input method's composition (Chinese, Japanese, Korean...), drawn
+    // at the cursor — (x, y) is the top of its line: the text on the field's
+    // background, underlined (thick under the part the input method has
+    // selected), with its own cursor. Tells the system where it is, so the
+    // candidate list opens beside it. Returns its width.
+    define _draw_compose(self, win: window.Window, t: Theme, x: Int, y: Int) -> Int {
+        lh := t.line()
+        c := self._compose
+        cw := self._text_w(c)
+        win.rect(x, y, cw, lh, t.input)
+        win.text(c, x, y, t.text, scale=t.scale, font=t.font)
+        win.rect(x, y + lh - 1, cw, 1, t.text)
+        at := _clamp(self._compose_cursor, 0, c.length())
+        cx := x + self._text_w(c.substring(0, at))
+        if self._compose_len > 0 {
+            end := _clamp(at + self._compose_len, at, c.length())
+            win.rect(cx, y + lh - 2, self._text_w(c.substring(at, end)), 2, t.accent)
+        }
+        win.rect(cx, y, _max(1, t.scale), lh, t.text)
+        win.text_input_area(x, y, _max(1, cw), lh)
+        return cw
+    }
+
+    define _changed(self) -> void {
+        if self.on_change != null { self.on_change(self.text) }
+    }
+
+    // Remember the state before an edit. A run of typed characters is one
+    // undo step; anything else (paste, delete, Enter) starts a new one.
+    define _snapshot(self, typing: Bool) -> void {
+        if typing and self._typing and self._undo.length() > 0 {
+            return
+        }
+        self._undo.append([self.text, self.cursor, self.anchor])
+        if self._undo.length() > 200 {
+            rest := []
+            i := 1
+            while i < self._undo.length() {
+                rest.append(self._undo[i])
+                i = i + 1
+            }
+            self._undo = rest
+        }
+        self._redo = []
+        self._typing = typing
+    }
+
+    define _restore(self, state: List) -> void {
+        t: String = state[0]
+        c: Int = state[1]
+        a: Int = state[2]
+        self.text = t
+        self.cursor = c
+        self.anchor = a
+        self._fix()
+        self._typing = false
+        self._changed()
+    }
+
+    --- Undo the last edit (Ctrl+Z); false when there's nothing to undo. ---
+    define undo(self) -> Bool {
+        if self._undo.length() == 0 { return false }
+        self._redo.append([self.text, self.cursor, self.anchor])
+        state: List = self._undo.pop()
+        self._restore(state)
+        return true
+    }
+
+    --- Redo what `undo` took back (Ctrl+Y / Ctrl+Shift+Z). ---
+    define redo(self) -> Bool {
+        if self._redo.length() == 0 { return false }
+        self._undo.append([self.text, self.cursor, self.anchor])
+        state: List = self._redo.pop()
+        self._restore(state)
+        return true
+    }
+
+    // Keep cursor / anchor inside the text (after `text` was set from code).
+    define _fix(self) -> void {
+        n := self.text.length()
+        self.cursor = _clamp(self.cursor, 0, n)
+        self.anchor = _clamp(self.anchor, 0, n)
+    }
+
+    --- True when some text is selected. ---
+    define has_selection(self) -> Bool {
+        self._fix()
+        return self.anchor != self.cursor
+    }
+
+    --- Where the selection starts (== `selection_end()` when nothing is selected). ---
+    define selection_start(self) -> Int {
+        self._fix()
+        return _min(self.anchor, self.cursor)
+    }
+
+    --- Where the selection ends. ---
+    define selection_end(self) -> Int {
+        self._fix()
+        return _max(self.anchor, self.cursor)
+    }
+
+    --- The selected text ("" if none). ---
+    define selected_text(self) -> String {
+        return self.text.substring(self.selection_start(), self.selection_end())
+    }
+
+    --- Select from `start` to `end` (the cursor goes to `end`). ---
+    define select(self, start: Int, end: Int) -> void {
+        n := self.text.length()
+        self.anchor = _clamp(start, 0, n)
+        self.cursor = _clamp(end, 0, n)
+    }
+
+    --- Select everything. ---
+    define select_all(self) -> void {
+        self.select(0, self.text.length())
+    }
+
+    // Remove the selected text; true if there was any.
+    define _cut_selection(self) -> Bool {
+        if not self.has_selection() { return false }
+        a := self.selection_start()
+        b := self.selection_end()
+        self.text = self.text.substring(0, a) + self.text.substring(b, self.text.length())
+        self.cursor = a
+        self.anchor = a
+        return true
+    }
+
+    --- Insert `s` at the cursor, as typing would (replaces the selection). ---
+    define insert(self, s: String) -> void {
+        self._snapshot(s.length() == 1 and s != "\n" and not self.has_selection() and s != " ")
+        self._cut_selection()
+        self._fix()
+        c := self.cursor
+        self.text = self.text.substring(0, c) + s + self.text.substring(c, self.text.length())
+        self.cursor = c + s.length()
+        self.anchor = self.cursor
+        self._changed()
+    }
+
+    --- Copy the selection to the clipboard. ---
+    define copy(self) -> void {
+        if self.has_selection() { window.set_clipboard(self.selected_text()) }
+    }
+
+    --- Copy the selection to the clipboard and remove it. ---
+    define cut(self) -> void {
+        if self.has_selection() {
+            self.copy()
+            self._snapshot(false)
+            self._cut_selection()
+            self._changed()
+        }
+    }
+
+    --- Insert what's on the clipboard. ---
+    define paste(self) -> void {
+        s := self._clean(window.clipboard())
+        if s.length() > 0 { self.insert(s) }
+    }
+
+    // What pasted text becomes: line breaks turn into spaces on one line.
+    define _clean(self, s: String) -> String {
+        if self.single_line { return s.replace("\r\n", " ").replace("\n", " ").replace("\t", " ") }
+        return s.replace("\r\n", "\n")
+    }
+
+    define _move(self, to: Int, grow: Bool) -> void {
+        self._typing = false
+        self.cursor = _clamp(to, 0, self.text.length())
+        if not grow { self.anchor = self.cursor }
+    }
+
+    // Start of the word before i / end of the word after i.
+    define _word_left(self, i: Int) -> Int {
+        j := i
+        while j > 0 and not _wordy(self.text.substring(j - 1, j)) { j = j - 1 }
+        while j > 0 and _wordy(self.text.substring(j - 1, j)) { j = j - 1 }
+        return j
+    }
+
+    define _word_right(self, i: Int) -> Int {
+        n := self.text.length()
+        j := i
+        while j < n and not _wordy(self.text.substring(j, j + 1)) { j = j + 1 }
+        while j < n and _wordy(self.text.substring(j, j + 1)) { j = j + 1 }
+        return j
+    }
+
+    // Select the word (or run of other characters) at i.
+    define _select_word(self, i: Int) -> void {
+        n := self.text.length()
+        if n == 0 { return }
+        at := _clamp(i, 0, n - 1)
+        if i == n and i > 0 { at = i - 1 }
+        kind := _wordy(self.text.substring(at, at + 1))
+        a := at
+        b := at + 1
+        while a > 0 and _wordy(self.text.substring(a - 1, a)) == kind { a = a - 1 }
+        while b < n and _wordy(self.text.substring(b, b + 1)) == kind { b = b + 1 }
+        self.select(a, b)
+    }
+
+    // Start / end of the line holding i ("\n"-separated).
+    define _line_start(self, i: Int) -> Int {
+        j := _clamp(i, 0, self.text.length())
+        while j > 0 and self.text.substring(j - 1, j) != "\n" { j = j - 1 }
+        return j
+    }
+
+    define _line_end(self, i: Int) -> Int {
+        n := self.text.length()
+        j := _clamp(i, 0, n)
+        while j < n and self.text.substring(j, j + 1) != "\n" { j = j + 1 }
+        return j
+    }
+
+    // Pixel width of text[a:b] in the theme's font (fixed-width without one).
+    define _span_w(self, a: Int, b: Int) -> Int {
+        if b <= a { return 0 }
+        if self._t == null or self._t.font == null { return (b - a) * self._cw }
+        return self._t.text_w(self.text.substring(a, b))
+    }
+
+    // The index in [a, b] whose x offset from `a` is nearest to `rel` px.
+    define _index_near(self, a: Int, b: Int, rel: Int) -> Int {
+        if rel <= 0 { return a }
+        if self._t == null or self._t.font == null {
+            return _clamp(a + (rel + self._cw / 2) / self._cw, a, b)
+        }
+        prev := 0
+        i := a + 1
+        while i <= b {
+            w := self._span_w(a, i)
+            if w >= rel {
+                if rel - prev < w - rel { return i - 1 }
+                return i
+            }
+            prev = w
+            i = i + 1
+        }
+        return b
+    }
+
+    --- The text index under the point (px, py) (where a click puts the cursor). ---
+    define index_at(self, px: Int, py: Int) -> Int {
+        return 0
+    }
+
+    // Editing keys and mouse handling both widgets share; true if used.
+    define _edit(self, e: window.Event) -> Bool {
+        if e.kind == "compose" {
+            self._compose = e.text
+            self._compose_cursor = e.cursor
+            self._compose_len = e.length
+            return true
+        }
+        // While composing, the input method uses the keys (Backspace edits
+        // the composition, Enter accepts it) — they don't edit the text.
+        if self._compose != "" and (e.kind == "key_down" or e.kind == "key_up") and not e.ctrl and not e.meta {
+            return true
+        }
+        if e.kind == "text" {
+            self._compose = ""
+            self.insert(e.text)
+            return true
+        }
+        if e.kind == "mouse_down" and e.button == 1 {
+            i := self.index_at(e.x, e.y)
+            if e.clicks >= 3 {
+                self.select(self._line_start(i), self._line_end(i))
+            } elif e.clicks == 2 {
+                self._select_word(i)
+            } else {
+                self._move(i, e.shift)
+                self._dragging = true
+            }
+            return true
+        }
+        if e.kind == "mouse_move" {
+            if self._dragging { self.cursor = self.index_at(e.x, e.y) }
+            return self._dragging
+        }
+        if e.kind == "mouse_up" {
+            self._dragging = false
+            return true
+        }
+        if e.kind != "key_down" { return false }
+        k := e.key
+        mod := e.ctrl or e.meta
+        // In a line that reads right to left, Left moves on through the
+        // text (the cursor goes the way the arrow points).
+        if (k == "left" or k == "right") and self._rtl_here() {
+            k = k == "left" ? "right" : "left"
+        }
+        if mod and (k == "y" or (k == "z" and e.shift)) {
+            self.redo()
+        } elif mod and k == "z" {
+            self.undo()
+        } elif mod and k == "a" {
+            self.select_all()
+        } elif mod and k == "c" {
+            self.copy()
+        } elif mod and k == "x" {
+            self.cut()
+        } elif mod and k == "v" {
+            self.paste()
+        } elif k == "left" {
+            if self.has_selection() and not e.shift {
+                self._move(self.selection_start(), false)
+            } elif mod {
+                self._move(self._word_left(self.cursor), e.shift)
+            } else {
+                self._move(self.cursor - 1, e.shift)
+            }
+        } elif k == "right" {
+            if self.has_selection() and not e.shift {
+                self._move(self.selection_end(), false)
+            } elif mod {
+                self._move(self._word_right(self.cursor), e.shift)
+            } else {
+                self._move(self.cursor + 1, e.shift)
+            }
+        } elif k == "backspace" {
+            if self.has_selection() or self.cursor > 0 { self._snapshot(false) }
+            if self._cut_selection() {
+                self._changed()
+            } elif self.cursor > 0 {
+                start := self.cursor - 1
+                if mod { start = self._word_left(self.cursor) }
+                self.text = self.text.substring(0, start) + self.text.substring(self.cursor, self.text.length())
+                self.cursor = start
+                self.anchor = start
+                self._changed()
+            }
+        } elif k == "delete" {
+            if self.has_selection() or self.cursor < self.text.length() { self._snapshot(false) }
+            if self._cut_selection() {
+                self._changed()
+            } elif self.cursor < self.text.length() {
+                stop := self.cursor + 1
+                if mod { stop = self._word_right(self.cursor) }
+                self.text = self.text.substring(0, self.cursor) + self.text.substring(stop, self.text.length())
+                self.anchor = self.cursor
+                self._changed()
+            }
+        } else {
+            return false
+        }
+        return true
+    }
+}

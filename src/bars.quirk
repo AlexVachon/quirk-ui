@@ -1,0 +1,272 @@
+// ui: ToolButton, Toolbar, StatusBar
+
+from typing.primitives.string use { String }
+from typing.collections.list use { List }
+use window
+from .util use { mix, _max }
+from .theme use { Theme }
+from .widget use { tooltip, Widget, _focus_ring, _ink }
+from .layout use { Row }
+from .access use { AccessNode }
+
+---
+A button for a `ui.Toolbar`: an `icon` (an image file — PNG, JPEG, BMP,
+GIF, TGA — drawn 16x16 times the theme scale) and / or `text`, plus a
+`tooltip`. `on_click` like a Button. `ui.ToolButton("-")` is a separator.
+---
+struct ToolButton : Widget {
+    text: String
+    icon: String
+    on_click: Callable
+    _img: window.Image
+    _img_failed: Bool
+    define access_action(self, action: String, value: String, node: AccessNode) -> Bool {
+        if action != "invoke" or not self.enabled { return false }
+        self.click()
+        return true
+    }
+
+    define access_role(self) -> String {
+        return "button"
+    }
+
+    define _a11y_name(self) -> String {
+        return self.text
+    }
+
+
+    define __init(self, text: String = "", icon: String = "", on_click: Callable = null, tooltip: String = "") -> void {
+        super().__init()
+        self.text = text
+        self.icon = icon
+        self.on_click = on_click
+        self.tooltip = tooltip
+        self._img = null
+        self._img_failed = false
+        self.focusable = text != "-"
+    }
+
+    define is_separator(self) -> Bool {
+        return self.text == "-"
+    }
+
+    --- Press it from code. ---
+    define click(self) -> void {
+        if self.enabled and self.on_click != null { self.on_click() }
+    }
+
+    define _icon_size(self, t: Theme) -> Int {
+        return 16 * t.scale
+    }
+
+    define measure(self, t: Theme) -> void {
+        if self.is_separator() {
+            self.min_w = 9
+            self.min_h = t.line() + 12
+            return
+        }
+        w := 12
+        if self.icon.length() > 0 { w = w + self._icon_size(t) }
+        if self.text.length() > 0 {
+            if self.icon.length() > 0 { w = w + t.char_w() / 2 }
+            w = w + t.text_w(self.text)
+        }
+        self.min_w = w
+        self.min_h = _max(t.line(), self._icon_size(t)) + 12
+    }
+
+    define handle(self, e: window.Event) -> Bool {
+        if not self.enabled or self.is_separator() { return false }
+        if e.kind == "mouse_down" and e.button == 1 {
+            self.pressed = true
+            return true
+        }
+        if e.kind == "mouse_up" and e.button == 1 {
+            was := self.pressed
+            self.pressed = false
+            if was and self.contains(e.x, e.y) { self.click() }
+            return true
+        }
+        if e.kind == "key_down" and (e.key == "return" or e.key == "space") {
+            self.click()
+            return true
+        }
+        return false
+    }
+
+    define draw(self, win: window.Window, t: Theme) -> void {
+        if self.is_separator() {
+            win.rect(self.x + 4, self.y + 4, 1, self.height - 8, t.border)
+            return
+        }
+        if self.pressed {
+            win.rect(self.x, self.y, self.width, self.height, mix(t.surface, window.black(), 20))
+        } elif self.hovered and self.enabled {
+            win.rect(self.x, self.y, self.width, self.height, mix(t.surface, t.text, 12))
+        }
+        x := self.x + 6
+        if self.icon.length() > 0 {
+            if self._img == null and not self._img_failed {
+                try {
+                    self._img = win.load_image(self.icon)
+                } catch (window.WindowError) {
+                    self._img_failed = true
+                }
+            }
+            sz := self._icon_size(t)
+            iy := self.y + (self.height - sz) / 2
+            if self._img != null {
+                alpha := 255
+                if not self.enabled { alpha = 90 }
+                win.image(self._img, x, iy, width=sz, height=sz, alpha=alpha)
+            } else {
+                win.rect(x, iy, sz, sz, t.muted, fill=false)       // missing icon
+            }
+            x = x + sz + t.char_w() / 2
+        }
+        if self.text.length() > 0 {
+            win.text(self.text, x, self.y + (self.height - t.line()) / 2, _ink(self, t.text, t), scale=t.scale, font=t.font)
+        }
+        if self.focused { _focus_ring(win, self, t) }
+    }
+}
+
+---
+A row of `ui.ToolButton`s on a raised strip, usually under the menu bar.
+---
+struct Toolbar : Row {
+    define __init(self, buttons: List) -> void {
+        super().__init(buttons, 3, 2)
+    }
+    define access_role(self) -> String {
+        return "toolbar"
+    }
+
+
+    define draw(self, win: window.Window, t: Theme) -> void {
+        win.rect(self.x, self.y, self.width, self.height, t.surface)
+        win.rect(self.x, self.y + self.height - 1, self.width, 1, t.border)
+        for c in self._kids {
+            w: Widget = c
+            if w.visible { w.draw(win, t) }
+        }
+    }
+}
+
+---
+A strip of text sections along the bottom of a window:
+`ui.StatusBar(["Ready", "Ln 1, Col 1"])`. The first section takes the
+free space; the others are right-aligned. `set(i, text)` changes one.
+`lead`: a coloured item at the left edge, a button (`on_lead()` on a
+click, `lead_tip` its tooltip) — VS Code's remote indicator.
+---
+struct StatusBar : Widget {
+    sections: List
+    lead: String
+    on_lead: Callable
+    lead_tip: String
+    _lead_w: Int
+    define access_role(self) -> String {
+        return "status"
+    }
+
+    define access_value(self) -> String {
+        out := self.lead
+        for sec in self.sections {
+            if out != "" { out = out + " | " }
+            out = out + String(sec)
+        }
+        return out
+    }
+
+
+    define __init(self, sections: List, lead: String = "", on_lead: Callable = null, lead_tip: String = "") -> void {
+        super().__init()
+        self.sections = sections
+        self.lead = lead
+        self.on_lead = on_lead
+        self.lead_tip = lead_tip
+        self._lead_w = 0
+        self.takes_clicks = true
+    }
+
+    define access_action(self, action: String, value: String, node: AccessNode) -> Bool {
+        if action != "invoke" or self.lead == "" or self.on_lead == null { return false }
+        self.on_lead()
+        return true
+    }
+
+    // The lead item's width (0: none).
+    define _lead_width(self, t: Theme) -> Int {
+        if self.lead == "" { return 0 }
+        return t.text_w(self.lead) + 2 * t.char_w()
+    }
+
+    define _on_lead(self, px: Int, py: Int) -> Bool {
+        return self._lead_w > 0 and px >= self.x and px < self.x + self._lead_w and py >= self.y and py < self.y + self.height
+    }
+
+    define handle(self, e: window.Event) -> Bool {
+        if e.kind == "mouse_down" and e.button == 1 and self._on_lead(e.x, e.y) {
+            if self.on_lead != null { self.on_lead() }
+            return true
+        }
+        return e.kind == "mouse_up"
+    }
+
+    define tooltip_at(self, px: Int, py: Int) -> String {
+        if self._on_lead(px, py) and self.lead_tip != "" { return self.lead_tip }
+        return self.tooltip
+    }
+
+    --- Change section `i`'s text (adds sections as needed). ---
+    define set(self, i: Int, text: String) -> void {
+        while self.sections.length() <= i { self.sections.append("") }
+        self.sections[i] = text
+    }
+
+    --- Section `i`'s text ("" if there's none). ---
+    define get(self, i: Int) -> String {
+        if i < 0 or i >= self.sections.length() { return "" }
+        return self.sections[i].str()
+    }
+
+    define measure(self, t: Theme) -> void {
+        w := 0
+        for sct in self.sections { w = w + t.text_w(sct.str()) + 3 * t.char_w() }
+        self.min_w = w + self._lead_width(t)
+        self.min_h = t.line() + 8
+    }
+
+    define draw(self, win: window.Window, t: Theme) -> void {
+        win.rect(self.x, self.y, self.width, self.height, t.surface)
+        win.rect(self.x, self.y, self.width, 1, t.border)
+        ty := self.y + (self.height - t.line()) / 2
+        self._lead_w = self._lead_width(t)
+        lx := self.x
+        if self._lead_w > 0 {
+            bg := t.accent
+            if self.hovered {
+                m := win.mouse()
+                if self._on_lead(m.0, m.1) { bg = mix(t.accent, t.accent_text, 15) }
+            }
+            win.rect(self.x, self.y, self._lead_w, self.height, bg)
+            win.text(self.lead, self.x + t.char_w(), ty, t.accent_text, scale=t.scale, font=t.font)
+            lx = self.x + self._lead_w
+        }
+        if self.sections.length() == 0 { return }
+        win.text(self.get(0), lx + t.char_w(), ty, t.muted, scale=t.scale, font=t.font)
+        rx := self.x + self.width - t.char_w()
+        i := self.sections.length() - 1
+        while i >= 1 {
+            text := self.get(i)
+            tw := t.text_w(text)
+            rx = rx - tw
+            win.text(text, rx, ty, t.muted, scale=t.scale, font=t.font)
+            rx = rx - t.char_w()
+            win.rect(rx, self.y + 4, 1, self.height - 8, t.border)
+            rx = rx - t.char_w()
+            i = i - 1
+        }
+    }
+}

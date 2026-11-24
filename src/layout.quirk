@@ -1,0 +1,188 @@
+// ui: Column, Row, Panel, Spacer
+
+from typing.primitives.string use { String }
+from typing.collections.list use { List }
+use window
+from .util use { _max }
+from .theme use { Theme }
+from .widget use { Widget }
+
+---
+Children stacked top to bottom, each as wide as the column. Free height
+goes to children with `expand = true`.
+---
+struct Column : Widget {
+    padding: Int
+    spacing: Int
+    background: Bool
+    fill: Int                // a colour to fill it with, no border (-1: none) — a side panel
+    _kids: List
+
+    define __init(self, children: List, padding: Int = 0, spacing: Int = 8, expand: Bool = false) -> void {
+        super().__init()
+        self._kids = children
+        self.padding = padding
+        self.spacing = spacing
+        self.background = false
+        self.fill = -1
+        self.expand = expand
+    }
+
+    define children(self) -> List {
+        return self._kids
+    }
+
+    --- Add a widget at the end. ---
+    define add(self, w: Widget) -> void {
+        self._kids.append(w)
+    }
+
+    define measure(self, t: Theme) -> void {
+        mw := 0
+        mh := 0
+        n := 0
+        for c in self._kids {
+            if c.visible {
+                c.measure(t)
+                mw = _max(mw, c.min_w)
+                mh = mh + c.min_h
+                n = n + 1
+            }
+        }
+        if n > 1 { mh = mh + self.spacing * (n - 1) }
+        self.min_w = mw + 2 * self.padding
+        self.min_h = mh + 2 * self.padding
+    }
+
+    define place(self, x: Int, y: Int, width: Int, height: Int) -> void {
+        self.x = x
+        self.y = y
+        self.width = width
+        self.height = height
+        inner_w := width - 2 * self.padding
+        free := height - self.min_h
+        k := 0
+        for c in self._kids {
+            if c.visible and c.expand { k = k + 1 }
+        }
+        cy := y + self.padding
+        for c in self._kids {
+            if c.visible {
+                ch := c.min_h
+                if c.expand and k > 0 and free > 0 { ch = ch + free / k }
+                c.place(x + self.padding, cy, inner_w, ch)
+                cy = cy + ch + self.spacing
+            }
+        }
+    }
+
+    define draw(self, win: window.Window, t: Theme) -> void {
+        if self.fill != -1 { win.rect(self.x, self.y, self.width, self.height, self.fill) }
+        if self.background {
+            win.rect(self.x, self.y, self.width, self.height, t.surface)
+            win.rect(self.x, self.y, self.width, self.height, t.border, fill=false)
+        }
+        for c in self._kids {
+            if c.visible { c.draw(win, t) }
+        }
+    }
+}
+
+---
+Children side by side, each as tall as the row. Free width goes to
+children with `expand = true`.
+---
+struct Row : Widget {
+    padding: Int
+    spacing: Int
+    _kids: List
+
+    define __init(self, children: List, padding: Int = 0, spacing: Int = 8, expand: Bool = false) -> void {
+        super().__init()
+        self._kids = children
+        self.padding = padding
+        self.spacing = spacing
+        self.expand = expand
+    }
+
+    define children(self) -> List {
+        return self._kids
+    }
+
+    --- Add a widget at the end. ---
+    define add(self, w: Widget) -> void {
+        self._kids.append(w)
+    }
+
+    define measure(self, t: Theme) -> void {
+        mw := 0
+        mh := 0
+        n := 0
+        for c in self._kids {
+            if c.visible {
+                c.measure(t)
+                mw = mw + c.min_w
+                mh = _max(mh, c.min_h)
+                n = n + 1
+            }
+        }
+        if n > 1 { mw = mw + self.spacing * (n - 1) }
+        self.min_w = mw + 2 * self.padding
+        self.min_h = mh + 2 * self.padding
+    }
+
+    define place(self, x: Int, y: Int, width: Int, height: Int) -> void {
+        self.x = x
+        self.y = y
+        self.width = width
+        self.height = height
+        inner_h := height - 2 * self.padding
+        free := width - self.min_w
+        k := 0
+        for c in self._kids {
+            if c.visible and c.expand { k = k + 1 }
+        }
+        cx := x + self.padding
+        for c in self._kids {
+            if c.visible {
+                cw := c.min_w
+                if c.expand and k > 0 and free > 0 { cw = cw + free / k }
+                c.place(cx, y + self.padding, cw, inner_h)
+                cx = cx + cw + self.spacing
+            }
+        }
+    }
+
+    define draw(self, win: window.Window, t: Theme) -> void {
+        for c in self._kids {
+            if c.visible { c.draw(win, t) }
+        }
+    }
+}
+
+--- A Column drawn on a raised surface with a border (12px padding by default). ---
+define Panel(children: List, padding: Int = 12, spacing: Int = 8, expand: Bool = false) -> Column {
+    col := Column(children, padding, spacing, expand)
+    col.background = true
+    return col
+}
+
+--- Empty space that takes whatever its container has left over. ---
+struct Spacer : Widget {
+    size: Int
+    define access_role(self) -> String {
+        return "none"
+    }
+
+
+    define __init(self, size: Int = 0) -> void {
+        super().__init()
+        self.size = size
+        self.expand = size == 0
+    }
+
+    define measure(self, t: Theme) -> void {
+        self.min_w = self.size
+        self.min_h = self.size
+    }
+}

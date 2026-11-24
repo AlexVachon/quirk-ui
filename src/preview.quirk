@@ -1,0 +1,80 @@
+// ui: previewed apps (QUIRK_UI_PREVIEW): event lines
+
+from typing.primitives.string use { String }
+from typing.collections.list use { List }
+use window
+from .util use { _max }
+
+---
+A line of a previewed app's events file as a `window.Event` (null if it
+isn't one) — see `App` (QUIRK_UI_PREVIEW). `preview_line(e)` writes one.
+---
+define preview_event(line: String) -> window.Event {
+    l := line.replace("\r", "")
+    if l.startswith("text ") {
+        e := window.Event("text")
+        e.text = l.substring(5, l.length())
+        return e
+    }
+    p := l.split(" ")
+    if p.length() == 0 { return null }
+    kind := String(p[0])
+    nums := []
+    try {
+        i := 1
+        while i < p.length() {
+            nums.append(Int(String(p[i])))
+            i = i + 1
+        }
+    } catch (Exception) {
+        nums = nums
+    }
+    if kind == "mouse_move" or kind == "mouse_down" or kind == "mouse_up" {
+        if p.length() < 3 { return null }
+        e := window.Event(kind)
+        e.x = _nth(nums, 0)
+        e.y = _nth(nums, 1)
+        e.button = kind == "mouse_move" ? 0 : _max(1, _nth(nums, 2))
+        e.clicks = kind == "mouse_down" ? _max(1, _nth(nums, 3)) : 0
+        e.left = kind == "mouse_down" and e.button == 1
+        return e
+    }
+    if kind == "wheel" {
+        e := window.Event("wheel")
+        e.dx = _nth(nums, 0)
+        e.dy = _nth(nums, 1)
+        return e
+    }
+    if (kind == "key_down" or kind == "key_up") and p.length() >= 2 {
+        e := window.Event(kind)
+        e.key = String(p[1])
+        e.ctrl = p.length() > 2 and String(p[2]) == "1"
+        e.shift = p.length() > 3 and String(p[3]) == "1"
+        e.alt = p.length() > 4 and String(p[4]) == "1"
+        e.meta = p.length() > 5 and String(p[5]) == "1"
+        return e
+    }
+    return null
+}
+
+define _bit(v: Bool) -> String {
+    return v ? "1" : "0"
+}
+
+define _nth(nums: List, i: Int) -> Int {
+    if i < nums.length() { return Int(nums[i]) }
+    return 0
+}
+
+--- The events-file line for `e` ("" for an event a preview doesn't pass on). ---
+define preview_line(e: window.Event) -> String {
+    k := e.kind
+    if k == "mouse_move" { return "mouse_move " + String(e.x) + " " + String(e.y) }
+    if k == "mouse_down" { return "mouse_down " + String(e.x) + " " + String(e.y) + " " + String(e.button) + " " + String(_max(1, e.clicks)) }
+    if k == "mouse_up" { return "mouse_up " + String(e.x) + " " + String(e.y) + " " + String(e.button) }
+    if k == "wheel" { return "wheel " + String(e.dx) + " " + String(e.dy) }
+    if k == "key_down" { return "key_down " + e.key + " " + _bit(e.ctrl) + " " + _bit(e.shift) + " " + _bit(e.alt) + " " + _bit(e.meta) }
+    if k == "key_up" { return "key_up " + e.key }
+    if k == "text" and not e.text.contains("\n") { return "text " + e.text }
+    return ""
+}

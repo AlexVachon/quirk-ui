@@ -1,0 +1,268 @@
+// ui: ListItem, ListView
+
+from typing.primitives.string use { String }
+from typing.collections.list use { List }
+use window
+from .util use { _clamp, _max, _min }
+from .theme use { Theme }
+from .widget use { Widget, _ink }
+from .access use { AccessNode, _entry_text }
+
+---
+An entry for a ListView or a Table cell with an `icon` (an image file,
+drawn at the text's height) before its `text`; `data` keeps anything you
+want with it. Its `.str()` is `text`, so sorting and `on_select` work as
+with plain strings.
+---
+struct ListItem {
+    text: String
+    icon: String
+    data: Any
+    _img: window.Image
+    _failed: Bool
+
+    define __init(self, text: String, icon: String = "", data: Any = null) -> void {
+        self.text = text
+        self.icon = icon
+        self.data = data
+        self._img = null
+        self._failed = false
+    }
+
+    define __str(self) -> String {
+        return self.text
+    }
+
+    // Draw the icon and text from (x, y) in a row `h` tall, `maxw` wide.
+    define draw(self, win: window.Window, t: Theme, x: Int, y: Int, h: Int, maxw: Int, color: Int) -> void {
+        tx := x
+        if self.icon.length() > 0 {
+            if self._img == null and not self._failed {
+                try {
+                    self._img = win.load_image(self.icon)
+                } catch (window.WindowError) {
+                    self._failed = true
+                }
+            }
+            sz := _min(h - 4, t.line())
+            if self._img != null { win.image(self._img, x, y + (h - sz) / 2, width=sz, height=sz) }
+            tx = x + sz + t.char_w() / 2
+        }
+        win.text(t.fit(self.text, maxw - (tx - x)), tx, y + (h - t.line()) / 2, color, scale=t.scale, font=t.font)
+    }
+}
+
+// Draw a list / table entry: a ListItem with its icon, anything else as text.
+define _draw_entry(win: window.Window, t: Theme, value: Any, x: Int, y: Int, h: Int, maxw: Int, color: Int) -> void {
+    if value != null and type(value) == "ListItem" {
+        li: ListItem = value
+        li.draw(win, t, x, y, h, maxw, color)
+        return
+    }
+    label := "None"
+    if value != null { label = value.str() }
+    win.text(t.fit(label, maxw), x, y + (h - t.line()) / 2, color, scale=t.scale, font=t.font)
+}
+
+---
+A scrollable list of items (anything with `.str()`), one selectable.
+`on_select(index, item)` runs when the selection changes; `selected` is
+the index (-1 = none). `rows` sets how many rows it asks room for.
+---
+struct ListView : Widget {
+    items: List
+    selected: Int
+    rows: Int
+    on_select: Callable
+    reorderable: Bool
+    on_reorder: Callable
+    _top: Int
+    _press: Int
+    _drop: Int
+    define access_action(self, action: String, value: String, node: AccessNode) -> Bool {
+        if action != "select" or node.index < 0 or not self.enabled { return false }
+        self.select(node.index)
+        return true
+    }
+
+    define access_role(self) -> String {
+        return "list"
+    }
+
+    define access_value(self) -> String {
+        if self.selected < 0 or self.selected >= self.items.length() { return "" }
+        return _entry_text(self.items[self.selected])
+    }
+
+    define _a11y_children(self) -> List {
+        out := []
+        i := 0
+        while i < self.items.length() {
+            item := AccessNode("listitem", _entry_text(self.items[i]), "", self.x, self.y, self.width, 0)._item(self, i)
+            if i == self.selected { item.states.append("selected") }
+            out.append(item)
+            i = i + 1
+        }
+        return out
+    }
+
+
+    define __init(self, items: List, on_select: Callable = null, rows: Int = 6, expand: Bool = false, reorderable: Bool = false, on_reorder: Callable = null) -> void {
+        super().__init()
+        self.items = items
+        self.selected = -1
+        self.rows = rows
+        self.on_select = on_select
+        self.reorderable = reorderable
+        self.on_reorder = on_reorder
+        self._top = 0
+        self._press = -1
+        self._drop = -1
+        self.focusable = true
+        self.expand = expand
+    }
+
+    --- Move item `src` to position `dst` (both indices into `items`). ---
+    define move_item(self, src: Int, dst: Int) -> void {
+        n := self.items.length()
+        if src < 0 or src >= n or dst < 0 or dst >= n or src == dst { return }
+        item := self.items[src]
+        rest := []
+        i := 0
+        while i < n {
+            if i != src { rest.append(self.items[i]) }
+            i = i + 1
+        }
+        out := []
+        i = 0
+        while i < rest.length() {
+            if i == dst { out.append(item) }
+            out.append(rest[i])
+            i = i + 1
+        }
+        if dst >= rest.length() { out.append(item) }
+        self.items.clear()
+        for v in out { self.items.append(v) }
+        if self.selected == src { self.selected = dst }
+        if self.on_reorder != null { self.on_reorder(src, dst) }
+    }
+
+    define _row_at_y(self, py: Int) -> Int {
+        return _clamp(self._top + (py - self.y - 2) / self._row_h(), 0, _max(0, self.items.length() - 1))
+    }
+
+    define _row_h(self) -> Int {
+        return 24
+    }
+
+    define _shown(self) -> Int {
+        return _max(1, (self.height - 4) / self._row_h())
+    }
+
+    --- Select row `i` (clamped); runs `on_select` if it changed. ---
+    define select(self, i: Int) -> void {
+        if self.items.length() == 0 { return }
+        ni := _clamp(i, 0, self.items.length() - 1)
+        if ni < self._top { self._top = ni }
+        if ni >= self._top + self._shown() { self._top = ni - self._shown() + 1 }
+        if ni != self.selected {
+            self.selected = ni
+            if self.on_select != null { self.on_select(ni, self.items[ni]) }
+        }
+    }
+
+    define measure(self, t: Theme) -> void {
+        widest := 10
+        for it in self.items { widest = _max(widest, t.text_w(it.str())) }
+        self.min_w = _min(widest, 60 * t.char_w()) + 16
+        self.min_h = self.rows * self._row_h() + 4
+    }
+
+    define handle(self, e: window.Event) -> Bool {
+        if not self.enabled { return false }
+        if e.kind == "mouse_down" and e.button == 3 {             // (for a context menu: no on_select)
+            row := (e.y - self.y - 2) / self._row_h()
+            if row >= 0 and self._top + row < self.items.length() { self.selected = self._top + row }
+            return true
+        }
+        if e.kind == "mouse_down" and e.button == 1 {
+            row := (e.y - self.y - 2) / self._row_h()
+            if row >= 0 and self._top + row < self.items.length() {
+                self.select(self._top + row)
+                self._press = self._top + row
+            }
+            return true
+        }
+        if e.kind == "mouse_move" and self.reorderable and self._press >= 0 and e.left {
+            self._drop = self._row_at_y(e.y)
+            return true
+        }
+        if e.kind == "mouse_up" {
+            if self.reorderable and self._press >= 0 and self._drop >= 0 and self._drop != self._press {
+                self.move_item(self._press, self._drop)
+            }
+            self._press = -1
+            self._drop = -1
+            return true
+        }
+        if e.kind == "wheel" {
+            most := _max(0, self.items.length() - self._shown())
+            self._top = _clamp(self._top - e.dy, 0, most)
+            return true
+        }
+        if e.kind == "key_down" {
+            if e.key == "down" {
+                self.select(self.selected + 1)
+                return true
+            }
+            if e.key == "up" {
+                self.select(_max(0, self.selected - 1))
+                return true
+            }
+            if e.key == "home" {
+                self.select(0)
+                return true
+            }
+            if e.key == "end" {
+                self.select(self.items.length() - 1)
+                return true
+            }
+        }
+        return false
+    }
+
+    define draw(self, win: window.Window, t: Theme) -> void {
+        win.rect(self.x, self.y, self.width, self.height, t.input)
+        border := t.border
+        if self.focused { border = t.accent }
+        win.rect(self.x, self.y, self.width, self.height, border, fill=false)
+        rh := self._row_h()
+        shown := self._shown()
+        most := _max(0, self.items.length() - shown)
+        if self._top > most { self._top = most }
+        i := self._top
+        while i < self.items.length() and i < self._top + shown {
+            ry := self.y + 2 + (i - self._top) * rh
+            ink := t.text
+            if i == self.selected {
+                win.rect(self.x + 2, ry, self.width - 4, rh, _ink(self, t.accent, t))
+                ink = t.accent_text
+            }
+            _draw_entry(win, t, self.items[i], self.x + 8, ry, rh, self.width - 16, _ink(self, ink, t))
+            i = i + 1
+        }
+        // Where a dragged row would land.
+        if self._drop >= 0 and self._drop != self._press and self._drop >= self._top and self._drop < self._top + shown {
+            ly := self.y + 2 + (self._drop - self._top) * rh
+            if self._drop > self._press { ly = ly + rh }
+            win.rect(self.x + 2, ly - 1, self.width - 4, 2, t.focus)
+        }
+        // Scroll indicator when not everything fits.
+        if self.items.length() > shown {
+            track := self.height - 4
+            bar := _max(8, track * shown / self.items.length())
+            by := self.y + 2 + (track - bar) * self._top / _max(1, most)
+            win.rect(self.x + self.width - 5, by, 3, bar, t.muted)
+        }
+    }
+}
