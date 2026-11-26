@@ -672,8 +672,41 @@ struct App {
         }
     }
 
-    --- Route one event to the widget it's for (also usable from tests). ---
+    --- Route one event to the widget it's for (also usable from tests); the mouse pointer follows. ---
     define dispatch(self, e: window.Event) -> void {
+        self._route(e)
+        k := e.kind
+        if k == "mouse_move" or k == "mouse_down" or k == "mouse_up" or k == "wheel" or k == "key_down" or k == "key_up" {
+            self._update_pointer()
+        }
+    }
+
+    ---
+    The pointer the widget under the mouse wants (the innermost that says
+    one; "arrow" over a popup, or nothing). Set when it changes.
+    ---
+    define _update_pointer(self) -> void {
+        name := ""
+        if self._capture != null { name = self._capture.pointer_at(self._mx, self._my) }   // (a drag keeps its pointer)
+        if name == "" and self._capture == null and _popups.length() > 0 {
+            top: Widget = _popups[_popups.length() - 1]
+            if top.popup_contains(self._mx, self._my) { name = "arrow" }
+        }
+        if name == "" {
+            path := []
+            _path(self._tree(), self._mx, self._my, path)
+            i := path.length() - 1
+            while i >= 0 and name == "" {
+                w: Widget = path[i]
+                name = w.pointer_at(self._mx, self._my)
+                i = i - 1
+            }
+        }
+        if name == "" { name = "arrow" }
+        if name != self.win.pointer() { self.win.set_pointer(name) }
+    }
+
+    define _route(self, e: window.Event) -> void {
         k := e.kind
         if k == "access" {
             self._access_do(e)

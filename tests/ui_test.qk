@@ -2402,3 +2402,28 @@ define test_refresh_tip() -> void {
     test.assert_eq(app._tip_text, "late")
     app.close()
 }
+// ───── v1.21.0: the mouse pointer follows the widget under it ─────
+define test_pointer_follows_widgets() -> void {
+    if not window.available() { return }
+    app := new_app()
+    field := ui.TextInput("hi")
+    button := ui.Button("Go")
+    split := ui.SplitView(ui.Column([field, button]), ui.Label("right"))
+    app.root = split
+    app.layout()
+    mouse(app, "mouse_move", field.x + 4, field.y + 4)
+    test.assert_eq(app.win.pointer(), "text")
+    mouse(app, "mouse_move", button.x + 4, button.y + 4)
+    test.assert_eq(app.win.pointer(), "arrow")
+    bar := split.x + split._first_px() + split._bar() / 2
+    mouse(app, "mouse_move", bar, split.y + 10)
+    test.assert_eq(app.win.pointer(), "resize_ew")
+    // Dragging the bar keeps the arrows, wherever the mouse goes.
+    mouse(app, "mouse_down", bar, split.y + 10)
+    mouse(app, "mouse_move", field.x + 4, field.y + 4)
+    test.assert_eq(app.win.pointer(), "resize_ew")
+    mouse(app, "mouse_up", field.x + 4, field.y + 4)
+    mouse(app, "mouse_move", field.x + 5, field.y + 4)
+    test.assert_eq(app.win.pointer(), "text")
+    app.close()
+}

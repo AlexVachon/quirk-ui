@@ -90,6 +90,12 @@ struct SplitView : Widget {
         return px >= self.x + a and px < self.x + a + self._bar()
     }
 
+    --- The resize arrows on the bar (and while it's dragged). ---
+    define pointer_at(self, px: Int, py: Int) -> String {
+        if self._drag or self._on_bar(px, py) { return self.vertical ? "resize_ns" : "resize_ew" }
+        return ""
+    }
+
     define handle(self, e: window.Event) -> Bool {
         if e.kind == "mouse_down" and e.button == 1 and self._on_bar(e.x, e.y) {
             self._drag = true

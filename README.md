@@ -167,6 +167,12 @@ A text that comes later (a language server's answer): `app.refresh_tip()`
 asks the widget under the mouse again; it shows once the mouse has rested
 the delay since it last moved (not after a click or a key).
 
+The mouse pointer follows the widget under it: text fields show the I-beam,
+a split view's bar the resize arrows (while dragged too), the rest the
+arrow. A widget of your own overrides `pointer_at(px, py) -> String`
+("hand", "text", "resize_ew"... — see `window.Window.set_pointer`; "" leaves
+it to the widget around it).
+
 ## Layout
 
 `ui.Column(children, padding=, spacing=)` stacks top to bottom,

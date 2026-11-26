@@ -240,6 +240,15 @@ struct Widget {
         return self.tooltip
     }
 
+    ---
+    The mouse pointer this widget wants at (px, py) — a name
+    `window.Window.set_pointer` knows ("text", "hand", "resize_ew"...); ""
+    leaves it to the widget around it (the window's default: "arrow").
+    ---
+    define pointer_at(self, px: Int, py: Int) -> String {
+        return ""
+    }
+
     --- True if (px, py) is inside the widget's box. ---
     define contains(self, px: Int, py: Int) -> Bool {
         return px >= self.x and py >= self.y and px < self.x + self.width and py < self.y + self.height

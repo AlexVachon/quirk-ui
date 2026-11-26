@@ -91,6 +91,11 @@ struct TextEdit : Widget {
         self._compose_len = 0
     }
 
+    --- The I-beam over the text. ---
+    define pointer_at(self, px: Int, py: Int) -> String {
+        return self.enabled ? "text" : ""
+    }
+
     define composing(self) -> Bool {
         return self._compose != ""
     }
