@@ -366,6 +366,27 @@ struct MenuBar : Widget {
         return -1
     }
 
+    ---
+    Open the menu whose title starts with `key` ("f" → File), its first
+    usable item highlighted (as a keyboard user expects). True if one did.
+    ---
+    define open_key(self, key: String) -> Bool {
+        i := 0
+        while i < self.titles.length() and i < self.menus.length() {
+            title := String(self.titles[i])
+            if title.length() > 0 and title[0].lower() == key {
+                self.open_menu(i)
+                m: Menu = self.menus[i]
+                if not m.is_open { return false }     // not drawn yet: no place to open
+                m._hover = -1
+                m._step(1)
+                return true
+            }
+            i = i + 1
+        }
+        return false
+    }
+
     --- Open menu `i` under its title (-1: close). ---
     define open_menu(self, i: Int) -> void {
         if self._open >= 0 and self._open < self.menus.length() {

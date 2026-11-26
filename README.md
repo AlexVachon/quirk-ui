@@ -163,6 +163,9 @@ Tooltips: set `widget.tooltip = "Hint"`, or inline:
 A widget whose parts say different things overrides
 `tooltip_at(px, py) -> String` ("" for none there) — a code editor's error
 under the mouse; a new text waits the delay again.
+A text that comes later (a language server's answer): `app.refresh_tip()`
+asks the widget under the mouse again; it shows once the mouse has rested
+the delay since it last moved (not after a click or a key).
 
 ## Layout
 

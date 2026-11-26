@@ -183,6 +183,7 @@ struct App {
     _tip: Widget
     _tip_since: Int
     _tip_text: String        // what the tooltip says (a new text waits the delay again)
+    _rested_at: Int          // when the mouse last moved (-1: a click or key since: no tooltip)
     _mx: Int
     _my: Int
     _drag_src: Widget
@@ -265,6 +266,7 @@ struct App {
         self._tip = null
         self._tip_text = ""
         self._tip_since = 0
+        self._rested_at = -1
         self._mx = -1
         self._my = -1
         self._drag_src = null
@@ -556,6 +558,15 @@ struct App {
         }
     }
 
+    // Alt+letter: open the menu bar menu whose title starts with `key`.
+    define _open_menu_key(self, key: String) -> Bool {
+        for b in _all_menu_bars(self._tree()) {
+            bar: MenuBar = b
+            if bar.open_key(key) { return true }
+        }
+        return false
+    }
+
     // Run the enabled menu item whose shortcut is `e`; true if one did.
     define _run_shortcut(self, e: window.Event) -> Bool {
         menus := []
@@ -673,6 +684,7 @@ struct App {
             if k == "mouse_move" {
                 self._mx = e.x
                 self._my = e.y
+                self._rested_at = window.ticks()
                 tip := _tip_at(self._tree(), e.x, e.y)
                 text := tip != null ? tip.tooltip_at(e.x, e.y) : ""
                 if tip != self._tip or text != self._tip_text {
@@ -682,6 +694,7 @@ struct App {
                 }
             } else {
                 self._tip_since = -1      // hidden until the mouse moves to another widget
+                self._rested_at = -1
             }
         }
         // An open popup gets the mouse first; a click anywhere else closes it.
@@ -839,6 +852,8 @@ struct App {
         // Menu shortcuts: from any menu bar, and the right-click menus of the
         // focused widget and those around it. Not while a popup is open.
         if k == "key_down" and _popups.length() == 0 and self._run_shortcut(e) { return }
+        // Alt+letter opens the menu bar menu with that first letter.
+        if k == "key_down" and e.alt and not e.ctrl and not e.meta and _popups.length() == 0 and self._open_menu_key(e.key) { return }
         // An open popup that takes keys (a menu) gets them first.
         if (k == "key_down" or k == "key_up" or k == "text" or k == "compose") and _popups.length() > 0 {
             top: Widget = _popups[_popups.length() - 1]
@@ -860,6 +875,27 @@ struct App {
     --- One frame: handle events, lay out, draw, present. False once the window is closed. ---
     --- Draw again at the next frame — after changing widgets outside an event (a timer, a task). ---
     define redraw(self) -> void {
+        self._dirty = true
+    }
+
+    ---
+    Ask the widget under the mouse for its tooltip again: for one whose text
+    comes later (a language server's hover answer). A new text shows once
+    the mouse has rested `tooltip_delay` ms since it last moved (at once if
+    it already has); nothing after a click or a key, until the mouse moves.
+    ---
+    define refresh_tip(self) -> void {
+        if self._rested_at < 0 { return }
+        
+        tip := _tip_at(self._tree(), self._mx, self._my)
+        text := tip != null ? tip.tooltip_at(self._mx, self._my) : ""
+
+        if tip == self._tip and text == self._tip_text { return }
+
+        self._tip = tip
+        self._tip_text = text
+        self._tip_since = self._rested_at
+        self._tip_shown = false
         self._dirty = true
     }
 

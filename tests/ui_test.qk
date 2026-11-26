@@ -288,11 +288,12 @@ define test_mix() -> void {
 }
 
 // ───── v1.1.0: selection, clipboard, TextArea, ScrollView, Dropdown, tooltips ─────
-define keym(app: ui.App, k: String, shift: Bool = false, ctrl: Bool = false) -> void {
+define keym(app: ui.App, k: String, shift: Bool = false, ctrl: Bool = false, alt: Bool = false) -> void {
     e := ev("key_down")
     e.key = k
     e.shift = shift
     e.ctrl = ctrl
+    e.alt = alt
     app.dispatch(e)
 }
 
@@ -809,6 +810,43 @@ define test_menu_bar_and_menus() -> void {
     // Clicking the open title again closes it.
     click(app, bar.x + file_w + 10, bar.y + 5)
     test.assert_false(edit.is_open)
+    app.close()
+}
+
+define test_alt_letter_opens_a_menu() -> void {
+    if not window.available() { return }
+    app := new_app()
+    log := []
+    file := ui.Menu([
+        ui.MenuItem("New", on_click=fn() { log.append("new") }),
+        ui.MenuItem("Find", on_click=fn() { log.append("find") }, shortcut="Alt+F"),
+    ])
+    edit := ui.Menu([
+        ui.MenuItem("-"),
+        ui.MenuItem("Undo", on_click=fn() { log.append("undo") }, enabled=false),
+        ui.MenuItem("Copy", on_click=fn() { log.append("copy") }),
+    ])
+    field := ui.TextInput("")
+    bar := ui.MenuBar(["File", "Edit"], [file, edit])
+    app.root = ui.Column([bar, field, ui.Spacer()])
+    app.layout()
+    app.draw()                                    // places the titles
+    app.focus = field
+    keym(app, "e", alt=true)                      // Alt+E: Edit, Copy highlighted
+    test.assert_true(edit.is_open)
+    test.assert_false(file.is_open)
+    typed(app, "e")                               // the text Alt+E also sends
+    test.assert_eq(field.text, "")
+    keym(app, "return")
+    test.assert_eq(log, ["copy"])
+    test.assert_false(edit.is_open)
+    // An item's own Alt shortcut wins over the title's letter.
+    keym(app, "f", alt=true)
+    test.assert_eq(log, ["copy", "find"])
+    test.assert_false(file.is_open)
+    // No title with that letter: the key goes on (nothing opens).
+    keym(app, "x", alt=true)
+    test.assert_false(file.is_open or edit.is_open)
     app.close()
 }
 
@@ -2315,4 +2353,52 @@ define test_previewed_app_writes_frames_and_reads_events() -> void {
     fs.remove_tree(dir)
     app.step()
     test.assert_true(not app.is_open())
+}
+
+// ───── v1.20.0: a tooltip whose text comes later (refresh_tip) ─────
+struct LateTip : ui.Widget {
+    text: String
+
+    define __init(self) -> void {
+        super().__init()
+        self.min_w = 100
+        self.min_h = 20
+        self.text = ""
+    }
+
+    define tooltip_at(self, px: Int, py: Int) -> String {
+        return self.text
+    }
+}
+
+define test_refresh_tip() -> void {
+    if not window.available() { return }
+    app := new_app()
+    w := LateTip()
+    app.root = ui.Row([w, ui.Spacer()], padding=0)
+    app.layout()
+    app.tooltip_delay = 0
+    mouse(app, "mouse_move", w.x + 5, w.y + 5)
+    test.assert_true(app._tip == null)                  // nothing to say yet
+    w.text = "found it"                                 // (the answer arrives)
+    app.refresh_tip()
+    test.assert_true(app._tip == w)
+    test.assert_eq(app._tip_text, "found it")
+    // The delay counts from when the mouse last moved, not from the answer.
+    app.tooltip_delay = 100000
+    w.text = "again"
+    app.refresh_tip()
+    test.assert_eq(app._tip_text, "again")
+    test.assert_true(app._tip_since <= window.ticks() and app._tip_since >= 0)
+    // After a key: no tooltip until the mouse moves again.
+    app.tooltip_delay = 0
+    w.text = ""
+    app.refresh_tip()
+    app.dispatch(ev("key_down"))
+    w.text = "late"
+    app.refresh_tip()
+    test.assert_true(app._tip == null)
+    mouse(app, "mouse_move", w.x + 6, w.y + 5)
+    test.assert_eq(app._tip_text, "late")
+    app.close()
 }
